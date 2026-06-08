@@ -298,10 +298,12 @@ commit one, so every later stage is automatically regression-checked.
 
 **Acceptance Gate:**
 - [x] DoD gate passes locally (coverage trivially 100% — only the covered stub + excluded shim/main).
-- [ ] `git push -u origin dev` and **CI is green on all three OSes**.
-- [ ] Audit entry written; `notes.md` running log updated.
+- [x] `git push -u origin dev` and **CI is green on all three OSes**.
+- [x] Audit entry written; `notes.md` running log updated.
 
-**Commit:** `chore: scaffold lib+bin, toolchain, and CI quality gate`
+**Commits:** `9f99ac3` `chore: scaffold lib+bin, toolchain, and CI quality gate`;
+`6d3a5be` `ci: fix coverage toolchain and Windows line endings`; `c2b31d8` `ci: use current
+Codecov action`; `30f9a70` `ci: keep coverage gate independent of codecov`.
 
 ---
 
