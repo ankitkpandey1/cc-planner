@@ -315,26 +315,26 @@ touching the filesystem, clock, or OS yet.
 **Preconditions:** Stage 0 gate green (run DoD + CI check).
 
 **Steps (TDD each):**
-- [ ] Types in `src/model.rs`: `Plan { date, timezone, blocks: Vec<Block> }`,
+- [x] Types in `src/model.rs`: `Plan { date, timezone, blocks: Vec<Block> }`,
       `Block { id, title, start, end|duration, notify, tags, status, run }`,
       `Status` enum (`Pending|Active|Done|Skipped|Missed|Expired`), a `Lead`/`Duration` newtype
       parsing `"30m"`, `"90s"`, `"1h30m"`, and a wall-clock `ClockTime` parsing `"11:00"`.
-- [ ] `serde` derive + TOML (de)serialize matching `DESIGN.md` §6.3 exactly (array-of-tables
+- [x] `serde` derive + TOML (de)serialize matching `DESIGN.md` §6.3 exactly (array-of-tables
       `[[block]]`). **Reject unknown fields on write/parse** (`#[serde(deny_unknown_fields)]`),
       preserve-with-warning on read where the design says so.
-- [ ] Validation (`Plan::validate`): unique `id` per day; exactly one of `end`/`duration`; well-formed
+- [x] Validation (`Plan::validate`): unique `id` per day; exactly one of `end`/`duration`; well-formed
       times; argv non-empty if `run` present. Typed errors mapping to exit code `2`.
-- [ ] **Schedule `rev`** (`Block::schedule_rev`): blake3 over the canonicalized trigger-affecting
+- [x] **Schedule `rev`** (`Block::schedule_rev`): blake3 over the canonicalized trigger-affecting
       fields ONLY (`id`, resolved `start`, resolved `end`/`duration`, `notify`) — never status/title/
       tags/run (D5, Inv-15). Deterministic and order-independent at the plan level.
-- [ ] Unit tests: parse/serialize fixtures; each validation error; rev excludes status/title/run; rev
+- [x] Unit tests: parse/serialize fixtures; each validation error; rev excludes status/title/run; rev
       changes when timing changes.
-- [ ] `proptest` invariants in `tests/properties.rs`: (a) TOML round-trip `parse(write(p)) == p`;
+- [x] `proptest` invariants in `tests/properties.rs`: (a) TOML round-trip `parse(write(p)) == p`;
       (b) `schedule_rev` stable under block reordering; (c) editing `status`/`title`/`run` leaves
       `schedule_rev` unchanged.
 
 **Acceptance Gate:**
-- [ ] DoD green; `model` module at 100% coverage. Audit + notes updated.
+- [x] DoD green; `model` module at 100% coverage. Audit + notes updated.
 
 **Commit:** `feat: plan/block model with TOML schema, validation, and schedule-rev`
 

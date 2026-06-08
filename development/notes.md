@@ -203,6 +203,29 @@ Tooling (installed in CI, not deps): `cargo-llvm-cov`, `cargo-deny`, `cargo-dist
 > Format: `### YYYY-MM-DD — <stage/topic>` then bullets. Record decisions, surprises, dead-ends,
 > and anything a future session must know. This is the anti-amnesia log.
 
+### 2026-06-08 — Stage 1 domain model + schedule rev
+- Stage 1 precondition: re-read `notes.md`, `backlog.md`, `implementation_checklist.md`, `DESIGN.md`
+  §6.3/§10/§12, and `CONVENTIONS.md`; re-ran the Stage 0/global gate and confirmed CI run
+  `27128281353` was green before coding.
+- TDD record: added `tests/model.rs` and `tests/properties.rs` first; the red state was the missing
+  `ccplan::model` module. Later self-review tightened the tests again to require `Span` and `Run`
+  domain types, catching the first implementation's too-permissive public `Option<end/duration>` and
+  `Vec<String>` `run` shape.
+- The public model now uses parse-don't-validate boundaries: raw TOML structs accept `end`/`duration`
+  and raw `run`, then convert to `Block { span: Span::End|Span::Duration, run: Option<Run> }`.
+  Missing/both span shapes and empty `run` become typed exit-code-2 validation errors at parse time.
+- Unknown fields follow the locked design decision: hard reject everywhere. The checklist's
+  "preserve-with-warning" phrase is stale because DESIGN §6.3 and the review notes explicitly removed
+  that behavior.
+- `schedule_rev` is a short blake3 hex over only `id`, start seconds, resolved end seconds, and notify
+  seconds. It excludes `title`, `status`, `tags`, and `run`; equivalent `end` and `duration` timing
+  produce the same rev.
+- `proptest` is included with `default-features = false, features = ["std"]`; default fork/timeout
+  features pulled in a duplicate `getrandom` path. `cargo tree --duplicates` is clean with the trimmed
+  feature set.
+- `blake3` brings transitive `arrayref` under `BSD-2-Clause`; `deny.toml` now explicitly allows that
+  OSI license. No advisory or duplicate-version exceptions were added.
+
 ### 2026-06-08 — Stage 0 scaffold + CI gate
 - Stage 0 started from `main` with docs only and no `Cargo.toml`; the required pre-stage DoD
   baseline failed at the missing-manifest boundary, as expected.

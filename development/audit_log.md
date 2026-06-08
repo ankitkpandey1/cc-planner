@@ -181,3 +181,131 @@ Codecov action`; `30f9a70` `ci: keep coverage gate independent of codecov`   · 
 - [x] DoD gate passes locally (coverage trivially 100% — only the covered stub + excluded shim/main).
 - [x] `git push -u origin dev` and CI is green on all three OSes.
 - [x] Audit entry written; `notes.md` running log updated.
+
+## Stage 1 — Domain model & TOML schema — 2026-06-08
+
+**Commit(s):** `16d55bf` `feat: plan/block model with TOML schema, validation, and schedule-rev`   ·   **Branch:** `dev`
+
+### A. Recon summary
+- Re-read `development/notes.md`, `development/backlog.md`, `development/implementation_checklist.md`,
+  `DESIGN.md` §6.3/§10/§12, and `CONVENTIONS.md`.
+- Re-ran the Stage 0/global gate before coding and confirmed Stage 0 CI run
+  https://github.com/ankitkpandey1/cc-planner/actions/runs/27128281353 was green.
+- Followed the later locked DESIGN/notes rule for unknown fields: reject everywhere. The checklist's
+  "preserve-with-warning" phrase is stale and has no matching design case.
+
+### B. What was built
+- Added `src/model.rs` and exported it from `src/lib.rs`.
+- Added `Plan`, `Block`, `Span`, `Run`, `Status`, `PlanDate`, `TimeZoneName`, `BlockId`,
+  `ClockTime`, `DurationSpec`, `Lead`, `ScheduleRev`, `PlanError`, and `ValidationError`.
+- Added strict TOML parsing/writing for the DESIGN §6.3 shape: top-level `date`/`timezone` and
+  `[[block]]` array-of-tables.
+- Added short schedule revs from blake3 over only trigger-affecting fields: `id`, start seconds,
+  resolved end seconds, and notify seconds.
+- Added focused model tests and `proptest` invariants for TOML round trips, order-independent plan revs,
+  and rev stability under lifecycle/content edits.
+
+### C. Self-review findings & fixes
+- First implementation exposed `Option<end>`, `Option<duration>`, and raw `Vec<String>` `run`, which
+  made invalid states constructible downstream. Fixed by introducing private raw TOML structs plus public
+  `Span::End|Span::Duration` and `Run` domain types.
+- `proptest` defaults pulled in an unnecessary duplicate `getrandom` path. Fixed by disabling defaults
+  and enabling only `std`.
+- `cargo-deny` rejected transitive `arrayref`'s BSD-2-Clause license from `blake3`. Fixed by adding the
+  OSI-approved license to the explicit allowlist, with no advisory or duplicate-version exceptions.
+- `cargo tree --duplicates` prints nothing after the feature trim.
+
+### D. Evidence
+- `cargo fmt --all -- --check`:
+
+  ```text
+  <no output; exit 0>
+  ```
+
+- `cargo clippy --all-targets --all-features -- -D warnings`:
+
+  ```text
+  Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.53s
+  ```
+
+- `cargo test --all-features --workspace`:
+
+  ```text
+  running 1 test
+  test tests::run_accepts_minimal_cli ... ok
+  test result: ok. 1 passed; 0 failed
+
+  running 1 test
+  test version_prints_package_version ... ok
+  test result: ok. 1 passed; 0 failed
+
+  running 13 tests
+  test result: ok. 13 passed; 0 failed
+
+  running 3 tests
+  test result: ok. 3 passed; 0 failed
+
+  Doc-tests ccplan
+  test result: ok. 0 passed; 0 failed
+  ```
+
+- `RUSTFLAGS="--cfg coverage_nightly" cargo +nightly llvm-cov --all-features --workspace
+  --fail-under-lines 100`:
+
+  ```text
+  model.rs  422 lines, 0 missed lines, 100.00% line cover
+  TOTAL     429 lines, 0 missed lines, 100.00% line cover
+  ```
+
+- `cargo deny check`:
+
+  ```text
+  advisories ok, bans ok, licenses ok, sources ok
+  ```
+
+- `cargo build --release`:
+
+  ```text
+  Finished `release` profile [optimized] target(s) in 2.62s
+  ```
+
+- `cargo +1.85.0 check --all-features --workspace`:
+
+  ```text
+  Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.79s
+  ```
+
+- `cargo tree --duplicates`:
+
+  ```text
+  warning: nothing to print.
+  ```
+
+- CI: https://github.com/ankitkpandey1/cc-planner/actions/runs/27129412859 passed.
+
+  ```text
+  ✓ test (ubuntu-latest) in 58s
+  ✓ test (macos-latest) in 58s
+  ✓ test (windows-latest) in 3m32s
+  ✓ MSRV in 40s
+  ✓ coverage in 50s
+  ✓ cargo-deny in 44s
+  ```
+
+- Coverage exclusions added this stage: none. The model module is fully covered; the only existing
+  exclusion remains the Stage 0 process-boundary `main` shim.
+
+### E. Reflection & learnings
+- The raw-TOML-to-domain split is worth the extra code: it preserves exact TOML diagnostics while keeping
+  invalid span/run states out of downstream logic.
+- The schedule rev contract is now executable: property tests prove block reordering and content/lifecycle
+  edits leave revs unchanged.
+- Dependency gates caught real polish work early: `proptest` feature trimming avoided duplicate versions,
+  and the new `blake3` license surface is explicit.
+
+### F. Backlog items raised/closed
+- Raised: none.
+- Closed: none.
+
+### G. Acceptance-gate confirmation
+- [x] DoD green; `model` module at 100% coverage. Audit + notes updated.
