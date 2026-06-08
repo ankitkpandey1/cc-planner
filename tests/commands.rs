@@ -1491,6 +1491,44 @@ fn test_fire_dry_run_is_read_only_for_plain_activation() {
 }
 
 #[test]
+fn test_fire_dry_run_leaves_ledger_untouched_so_real_fire_still_fires() {
+    // The core guarantee of read-only `--dry-run`: it must NOT write the at-most-once ledger.
+    // The status/notify/log assertions above would still pass even if the ledger were wrongly
+    // recorded — the regression would only surface as a real fire afterward being silently
+    // swallowed as AlreadyFired. So fire a dry run, then a real fire with identical coordinates,
+    // and assert the real fire actually activates, notifies, and logs.
+    let (_temp, context) = test_context_at("2026-06-08T11:00:00+05:30[Asia/Kolkata]");
+    context
+        .store
+        .set_plan(&plan(), HistoryPolicy::Preserve)
+        .unwrap();
+    let rev = focus_rev(&context);
+
+    let mut dry = fire_args("focus", "start", rev.as_str(), "2026-06-08T05:30:00Z");
+    dry.push("--dry-run".to_owned());
+    run_ok(&context, dry);
+
+    // Same coordinates, no --dry-run: the real fire must not see a recorded ledger entry.
+    run_ok(
+        &context,
+        fire_args("focus", "start", rev.as_str(), "2026-06-08T05:30:00Z"),
+    );
+
+    let stored = context.store.load_plan(&date()).unwrap().unwrap();
+    assert_eq!(
+        stored.blocks[0].status,
+        Status::Active,
+        "the real fire after a dry-run must still activate the block"
+    );
+    assert_eq!(context.notifier.notifications().len(), 1);
+    assert!(
+        std::fs::read_to_string(context.store.fire_log_path())
+            .unwrap()
+            .contains("focus start")
+    );
+}
+
+#[test]
 fn test_automation_truncates_large_output() {
     let (_temp, mut context) = test_context_at("2026-06-08T11:00:00+05:30[Asia/Kolkata]");
     let exe = if cfg!(windows) {
