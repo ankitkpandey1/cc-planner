@@ -919,6 +919,63 @@ fn status_reports_scheduler_list_failures_without_failing() {
 }
 
 #[test]
+fn apply_omits_notify_trigger_at_zero_lead_but_keeps_it_for_positive_lead() {
+    // Inv-16 (no double-notify): a block whose notify lead is 0 has its notify instant coincide
+    // with `start`, so apply schedules only start+end — the start event carries the single
+    // notification. A block with a positive lead also gets a distinct, earlier notify trigger.
+    let (_temp, context) = test_context_at("2026-06-08T10:00:00+05:30[Asia/Kolkata]");
+    let plan = Plan {
+        date: date(),
+        timezone: "Asia/Kolkata".parse().unwrap(),
+        blocks: vec![
+            {
+                let mut block = block_with(
+                    "zero",
+                    "Zero lead",
+                    "11:00",
+                    Span::Duration(DurationSpec::from_seconds(30 * 60).unwrap()),
+                );
+                block.notify = Lead::from_seconds(0).unwrap();
+                block
+            },
+            {
+                let mut block = block_with(
+                    "lead",
+                    "With lead",
+                    "12:00",
+                    Span::Duration(DurationSpec::from_seconds(30 * 60).unwrap()),
+                );
+                block.notify = Lead::from_seconds(10 * 60).unwrap();
+                block
+            },
+        ],
+    };
+    context
+        .store
+        .set_plan(&plan, HistoryPolicy::Preserve)
+        .unwrap();
+
+    run_ok(&context, ["ccplan", "apply"]);
+
+    let added = context
+        .scheduler
+        .calls()
+        .into_iter()
+        .filter_map(|call| match call {
+            SchedulerCall::Add(id) => Some(id),
+            SchedulerCall::Remove(_) => None,
+        })
+        .collect::<Vec<_>>();
+    let notify_triggers = added.iter().filter(|id| id.ends_with("-notify")).count();
+    // zero-lead: start+end (2); positive-lead: start+end+notify (3).
+    assert_eq!(added.len(), 5, "{added:?}");
+    assert_eq!(
+        notify_triggers, 1,
+        "only the positive-lead block gets a separate notify trigger: {added:?}"
+    );
+}
+
+#[test]
 fn store_update_serializes_concurrent_additive_writes_without_loss() {
     use std::sync::Arc;
 
