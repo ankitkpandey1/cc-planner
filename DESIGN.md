@@ -121,7 +121,7 @@ Two traits isolate all OS-specific behavior; the reconciler and lifecycle logic 
 | OS | Backend | Trigger object | Identity / namespace |
 |----|---------|----------------|----------------------|
 | Linux | `systemd --user` transient timers (`systemd-run --user --on-calendar=…`) | one timer+service per event | unit `ccplan-<date>-<idhash>-<rev>-<event>.timer` (id hashed + `systemd-escape`d) |
-| macOS | launchd LaunchAgents | one plist per event (`StartCalendarInterval`), `launchctl bootstrap` | label `io.ccplan.<date>.<idhash>.<rev>.<event>` |
+| macOS | launchd LaunchAgents | one plist per event (`StartCalendarInterval`), `launchctl bootstrap` | label `io.ccplan.<date>-<idhash>-<rev>-<event>` (the shared trigger-id token after the `io.ccplan.` prefix, so all three backends derive names from one `backend_id`) |
 | Windows | Task Scheduler (`schtasks.exe /Create /XML`) | one task per event | path `\ccplan\<date>-<idhash>-<rev>-<event>` |
 
 A **native scheduler is required on every platform** — there is no resident daemon or polling
@@ -131,6 +131,15 @@ authoritative. Every backend MUST: (a) realize exactly one trigger per `(date, i
 embed the schedule **rev** and `scheduled_at` in the fire invocation; (c) be reconcilable purely by
 listing/removing within its own namespace prefix; (d) clean up its own fired and orphaned triggers
 on the next reconcile.
+
+> **Scheduler precision & one-shot semantics differ per OS — they are NOT uniform.** systemd timers
+> set `AccuracySec=1s` (≈second precision); the Windows TimeTrigger uses a second-precision
+> `StartBoundary`. **launchd `StartCalendarInterval` is minute-granular (its `Second` key is not
+> honored) and recurring (no year field)**, so a macOS notification may fire up to ~59 s late and the
+> one-shot guarantee depends on the `fire` path booting its own agent out and deleting its plist as
+> its last step — which MUST run on *every* `fire`, including a no-op/stale fire. Each backend MUST
+> document its real precision; `fire`'s freshness gate (§7) is authoritative over best-effort
+> delivery. A per-platform conformance test MUST assert the exact identity grammar in the table above.
 
 **`Notifier`** — emit a desktop notification. Backends: Linux `libnotify`/`notify-send` (D-Bus);
 macOS `osascript`/`UserNotifications`; Windows toast (WinRT). There is no silent no-op notification
@@ -211,6 +220,12 @@ whose `argv[0]` must be an allowlisted absolute path (§9); **unknown fields are
 on both read and write** (`#[serde(deny_unknown_fields)]`), so an agent gets a hard error instead of
 silent drift; overlaps allowed (query semantics in §8).
 
+**`notify` lead & the no-double-notify rule.** When omitted, `notify` takes `config.notify.default_lead`
+(default **`5m`**). A lead of `0m` — or any lead whose resulting notify instant coincides with the
+block's `start` — does **not** schedule a separate `notify` trigger: the `start` event already
+notifies, so `apply` emits the `notify` trigger only when `notify_at < start`. A block is therefore
+never double-notified at a single instant (Inv-16).
+
 ### 6.4 Fired-event ledger (at-most-once)
 
 A fresh `rev` proves a trigger is *current* but does not prevent **double execution** from scheduler
@@ -254,6 +269,14 @@ its own rule, because a missed lead notification must never mark a block `missed
 If a machine is off so no `end` ever fires, the next `apply`/query reconciles overdue `active`
 blocks to `expired`. `done`/`skipped`/`missed`/`expired` blocks and `fire.log` are immutable history
 (Inv-7).
+
+**Read/write contract.** Query commands (`show`/`now`/`next`/`agenda`) reconcile overdue blocks **in
+memory only** — they compute the reconciled view for display but **never persist and never take the
+write lock**. The plan file changes solely on `apply`, `fire`, or an explicit mutation command
+(`set`/`add`/`edit`/`rm`/`done`/`skip`/`clear`). This keeps reads side-effect-free, non-blocking, and
+safe to run concurrently with a writer (Inv-18). Every mutation command is a **single locked
+read-modify-write transaction**: it acquires the store lock, then loads → mutates → writes under that
+held lock, so two concurrent mutations can never lose each other's blocks (Inv-17).
 
 ## 8. CLI surface
 
@@ -352,6 +375,14 @@ This is the highest-risk part of the design. Controls (defense in depth):
 - **Inv-15 (Schedule-only rev).** `rev` is a pure function of trigger-affecting fields (`id`, timing,
   notify lead) and excludes status/history/title/tags/run, so lifecycle and content edits never
   invalidate live triggers (§6.3).
+- **Inv-16 (No double-notify).** At most one notification is emitted per block per fire instant. When
+  the `notify` lead places the notify instant at (or after) `start`, no separate `notify` trigger is
+  scheduled — only the `start` event notifies (§6.3).
+- **Inv-17 (Transactional mutation).** Every mutating command performs its load → mutate → write as a
+  single transaction under the held store lock, so concurrent mutations are serialized and no
+  committed block is ever lost to a stale in-memory read (§7, extends Inv-9).
+- **Inv-18 (Side-effect-free reads).** Query commands never persist state and never take the write
+  lock; reconcile-on-query is computed in memory. Only `apply`/`fire`/explicit mutations write (§7).
 
 ## 11. Failure modes & handling
 
@@ -391,9 +422,14 @@ This is the highest-risk part of the design. Controls (defense in depth):
   plus a **~10-line binary shim** (`main`: parse args → `lib::run(cli, out, &ctx)` → `ExitCode`).
   All side effects are injected as traits on a `Context { clock, scheduler, notifier, fs_root }`:
   `Clock` (jiff has no clock-mocking — `now()` *must* be injected), `Scheduler`, `Notifier`. Tests
-  use `FixedClock` + recording fakes and never touch real systemd/launchd/Task Scheduler. The real
-  backends and `main` shim are the only code excluded from coverage, via
-  `#[cfg_attr(coverage_nightly, coverage(off))]` on the platform `#[cfg(target_os = …)]` modules.
+  use `FixedClock` + recording fakes and never touch real systemd/launchd/Task Scheduler. Only the
+  **side-effecting backend methods** (the actual `Command`/native-API calls) and the `main` shim are
+  excluded from coverage, via `#[cfg_attr(coverage_nightly, coverage(off))]` on **those methods**. The
+  **pure helpers inside the platform modules** — name/identity formatting, XML/plist building,
+  command-output parsing, calendar-time formatting — are *not* excluded; they live in coverage-on
+  submodules with unit tests. A **module-scope** `#![cfg_attr(coverage_nightly, coverage(off))]` is
+  forbidden: it hides untested logic behind a green 100% (the exact failure mode the coverage gate
+  exists to prevent).
 - **Scheduler backends (per-OS, behind one trait).** Linux: shell out to `systemd-run --user
   --on-calendar=…` (transient one-shot timers auto-clean via `RemainAfterElapse=no`; set
   `AccuracySec=1s`; pass `--setenv=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$UID/bus` so

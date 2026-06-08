@@ -13,7 +13,7 @@ Build **ccplan**, the cross-platform (Linux · macOS · Windows) Rust CLI day-pl
 `DESIGN.md`, to a **production-ready, open-source-shippable `v1.0.0`**:
 
 - Implements the full CLI surface and semantics in `DESIGN.md` (store → `apply` → `fire`; native
-  schedulers; notifications; `run:` automation; lifecycle; invariants Inv-1…Inv-15).
+  schedulers; notifications; `run:` automation; lifecycle; invariants Inv-1…Inv-18).
 - **100% line coverage** of the library (with only the documented `#[coverage(off)]` exclusions),
   **clippy-clean** (`-D warnings`), **fmt-clean**, **`cargo-deny`-clean**.
 - Strict **TDD** throughout (red → green → refactor).
@@ -85,7 +85,7 @@ Each stage MUST proceed through these phases in order. Do not collapse or skip a
 | 6 | `DESIGN.md` §9 policy; `std::process::Command` argv exec + timeout; Unix file-perms/ownership checks. |
 | 7 | `clap_complete` + `clap_mangen` `build.rs` integration. |
 | 8 | `dist init` config; `release-plz` action; Contributor Covenant; keep-a-changelog; dual-license convention; **agent skill format** (SKILL.md frontmatter conventions). |
-| 9 | Re-read all of `DESIGN.md` (Inv-1…Inv-15) for the conformance pass; the release/branch model (notes D13). |
+| 9 | Re-read all of `DESIGN.md` (Inv-1…Inv-18) for the conformance pass; the release/branch model (notes D13). |
 
 ---
 
@@ -129,11 +129,39 @@ into CI so the gate runs automatically on every push.
 > CI (a small `grep`/script over the test output, or `cargo test … 2>&1 | tee` + assertion) and keep
 > it green thereafter.
 
-> **Coverage honesty rule:** the only code allowed to be excluded from coverage is (a) platform
-> `#[cfg(target_os=…)]` real-backend modules, (b) the real shell-out/native-API impls of `Scheduler`/
-> `Notifier`/`Clock`, (c) `unreachable!()`/defensive `panic!`, (d) the `main` shim. Each exclusion
-> carries `#[cfg_attr(coverage_nightly, coverage(off))]` and a one-line comment justifying it. You may
-> **never** exclude business logic to hit the number.
+> **Coverage honesty rule:** the only code allowed to be excluded from coverage is (a) the real
+> shell-out/native-API **methods** of `Scheduler`/`Notifier`/`Clock` (the lines that actually invoke
+> `Command`/the OS), (b) `unreachable!()`/defensive `panic!`, (c) the `main` shim. Each exclusion
+> carries `#[cfg_attr(coverage_nightly, coverage(off))]` **at item (fn) scope** and a one-line comment
+> justifying it. **Module-scope `#![cfg_attr(coverage_nightly, coverage(off))]` is forbidden** — it
+> silently sweeps pure helpers (name/identity formatting, XML/plist building, command-output parsing,
+> calendar formatting) out of coverage while the number stays green. Those pure helpers MUST sit in a
+> coverage-*on* submodule with unit tests (mirror how `platform/mod.rs` keeps `fire_args`/identity/
+> doctor-rendering covered). You may **never** exclude business logic to hit the number.
+>
+> *(History: PR #1 violated this by marking whole backend modules `coverage(off)`. See `Reviews.md`
+> finding M3 — the rule originally even contradicted Stage 5, which is now fixed.)*
+
+> **Anti-gaming guards (run every stage, wired into CI in Stage 0).** A green number is not proof; an
+> agent under compaction will take the cheapest green path, so the cheap-but-wrong paths are blocked
+> mechanically, not by vigilance. Each guard **fails the build when it finds a match**:
+> ```sh
+> # 1. No module-scope coverage(off) — pure logic may not be swept out wholesale.
+> #    (Matches the inner `#![…coverage(off)]`; the crate-root feature attr and item-level `#[…]` don't.)
+> if grep -rnE --include='*.rs' '^#!\[cfg_attr\(coverage_nightly, coverage\(off\)\)\]' src; then
+>   echo 'FAIL: module-scope coverage(off) is forbidden — mark only IO methods, keep pure helpers tested'; exit 1
+> fi
+> # 2. Black-box tests never write outside an injected temp dir. (Scope: tests/ — production code may
+> #    legitimately use env::temp_dir(), e.g. the Windows task-XML temp file, so src/ is NOT scanned.)
+> if grep -rnE --include='*.rs' 'env::temp_dir\(\)' tests; then
+>   echo 'FAIL: tests must use assert_fs::TempDir, never the real temp dir'; exit 1
+> fi
+> ```
+> Inline `#[cfg(test)]` modules in `src/` must *also* use `assert_fs::TempDir` — that's reviewer-
+> enforced (grep can't scope to a `#[cfg(test)]` block without false-positiving production temp use);
+> B-014 fixes the one current violation in `src/store.rs`. If a guard must be relaxed, that is a
+> `backlog.md` item with justification, never a silent edit to the guard. *(Guard 1 currently fails on
+> the PR #1 tree — corrective work B-008; it goes green once cleared.)*
 
 ---
 
@@ -161,7 +189,7 @@ cc-planner/
 │   ├── config.rs              # config.toml model (automation/allowlist/grace…)
 │   ├── context.rs             # Context{clock,scheduler,notifier,store}; Scheduler/Notifier traits + fakes
 │   ├── commands/              # one module per CLI verb (set, add, show, apply, fire, …)
-│   └── platform/              # real backends; each #[cfg(target_os=…)] + #[coverage(off)]
+│   └── platform/              # real backends; #[cfg(target_os=…)]; coverage(off) on IO methods ONLY, pure helpers tested
 │       ├── mod.rs  systemd.rs  launchd.rs  schtasks.rs  notify.rs
 ├── tests/                     # integration: cli.rs, snapshots.rs, properties.rs, agent_docs.rs, integration_*.rs
 │   └── snapshots/             # committed insta *.snap files
@@ -232,8 +260,8 @@ cc-planner/
 - **Dependency injection via traits** (the backbone of testability): side-effecting capabilities are
   traits — `Clock`, `Scheduler`, `Notifier` — held in a `Context` struct threaded through `run`.
   Production wires real impls; tests wire `FixedClock` + recording fakes. Prefer generics
-  (`<S: Scheduler>`, zero-cost) or `&dyn` where object-safety/binary-size matters. Real impls are the
-  only `#[coverage(off)]` code.
+  (`<S: Scheduler>`, zero-cost) or `&dyn` where object-safety/binary-size matters. Only the real
+  IO **methods** are `#[coverage(off)]`; pure helpers beside them stay covered and tested.
 - **Pure core, imperative shell:** keep decision logic (`model`, `time`, `lifecycle`) pure and
   total — input → output, no IO. Push IO (`store`, `platform`) to the edges. Pure functions are
   trivially 100%-testable and property-testable.
@@ -266,8 +294,18 @@ cc-planner/
 - **Property tests** (`proptest`) for invariants, not examples: TOML round-trip, `schedule_rev`
   stability under reordering, `apply` idempotence, ledger check-and-set idempotence, "terminal status
   never transitions." Add the relevant invariant each stage introduces.
-- **Invariant traceability:** by Stage 9 every `DESIGN.md` invariant Inv-1…Inv-15 must have at least
-  one named test; reference the invariant in the test name or a `///`-doc.
+- **Invariant traceability:** by Stage 9 every `DESIGN.md` invariant Inv-1…Inv-18 must have at least
+  one named test; reference the invariant in the test name or a `///`-doc. See the **System Invariants**
+  section below for the cross-cutting ones (Inv-16/17/18) and their required tests — these are the
+  interaction bugs that single-stage tests miss.
+- **Test the behavior, not the line.** A test that only asserts `is_ok()`/exit-0 is worthless: it would
+  still pass with the function body deleted. Assert concrete output/state, the specific error variant,
+  **and** the exit code. Reads that emit human output get a human-output assertion too — not just the
+  `--json` path (PR #1 shipped an unusable human `now`/`next` because only JSON was tested).
+- **Conformance tests bind code to the spec** (recon-reading a detail is lossy; a test pins it
+  forever): snapshot every command's `--help` and assert each command's flag set against `DESIGN.md`
+  §8; assert each platform backend's identity string against the exact `DESIGN.md` §6.1 grammar (don't
+  let the test bake in whatever the code happens to emit).
 - **Coverage maintained, not retrofitted:** run
   `RUSTFLAGS="--cfg coverage_nightly" cargo +nightly llvm-cov --fail-under-lines 100` each stage so the
   number never regresses. The only legitimate exclusions are listed in the DoD gate's
@@ -282,6 +320,24 @@ cc-planner/
   a slow path; fix it or file a `backlog.md` item.
 
 ---
+
+## 🔒 SYSTEM INVARIANTS (cross-stage — each needs a dedicated test)
+
+The stages decompose the work cleanly, but the worst bugs live in the **interactions** between
+separately-specified pieces — and TDD only drives what a test asserts. PR #1's three MAJOR bugs were
+all interaction bugs no single stage owned (see `Reviews.md` post-mortem). So these properties are
+called out *above* the stages and each MUST have its own property or integration test, asserted in the
+stage noted and re-checked at the Stage 9 conformance pass:
+
+| Invariant | Property | Test home |
+|-----------|----------|-----------|
+| Inv-16 (no double-notify) | A block produces **≤1 notification per fire instant**; when `notify` lead is `0` / coincides with `start`, no separate `notify` trigger is scheduled — only `start` notifies. | Stage 4 (`apply`/`desired_triggers` test + fire test) |
+| Inv-17 (transactional mutation) | Two concurrent mutating commands never lose a block: each holds the store lock across load→mutate→write. Test two interleaved additive edits and assert **both** blocks survive. | Stage 3 (`Store::update`) + Stage 4 |
+| Inv-18 (side-effect-free reads) | `show`/`now`/`next`/`agenda` reconcile in memory, **never persist, never take the write lock**. Test: a read against an overdue plan leaves the file byte-identical and succeeds while a writer holds the lock. | Stage 4 |
+| (ledger ↔ OS) | `status` must not overcount: owned `triggers.json` is reconciled against live OS triggers; self-fired/auto-cleaned triggers don't linger as phantom counts. | Stage 5 (`backlog.md` B-016) |
+
+> **Why this section exists:** an invariant with no test is a wish. If you add behavior that touches
+> notifications, the store lock, or query reads, you are touching one of these — add/extend its test.
 
 ## 📦 STAGES
 
@@ -474,13 +530,17 @@ fake backend).
 ### Stage 5 — Native scheduler & notifier backends (per-OS)
 
 **Objective:** Real `Scheduler` + `Notifier` implementations for Linux/macOS/Windows behind the
-traits, plus `doctor`. These are the only modules excluded from coverage.
+traits, plus `doctor`. Only the **IO methods** in these modules are excluded from coverage; the pure
+helpers beside them (name/identity formatting, XML/plist building, command-output parsing, calendar
+formatting) stay covered and unit-tested (see Coverage honesty rule + Anti-gaming guards).
 
 **Preconditions:** Stage 4 gate green.
 
 **Steps:**
-- [x] `src/platform/mod.rs` selects the backend by `#[cfg(target_os=…)]`. Each backend module is
-      `#[cfg_attr(coverage_nightly, coverage(off))]` with a justifying comment.
+- [x] `src/platform/mod.rs` selects the backend by `#[cfg(target_os=…)]`. Mark `#[coverage(off)]` on
+      the **IO methods only** (each with a justifying comment); pure helpers go in a coverage-on
+      submodule with unit tests. ⚠ **PR #1 used module-scope `coverage(off)` here — wrong; tracked as
+      B-008, must be cleared before ship and asserted by the Anti-gaming guard.**
 - [x] **Linux** (`platform/systemd.rs`): shell out to `systemd-run --user` exactly per notes §3
       (unit name `ccplan-<date>-<idhash>-<rev>-<event>` — full trigger identity, UTC `--on-calendar`,
       `AccuracySec=1s`, `--setenv` for `DBUS_SESSION_BUS_ADDRESS`/`DISPLAY`/`WAYLAND_DISPLAY`/
@@ -616,7 +676,7 @@ tested agent skill** so agents can install and use `ccplan` — with automated c
 - [ ] **Dogfood end-to-end** on the dev machine: author a real day with `set --from -`, `apply`,
       confirm notifications fire at the right times, an allow-listed `run:` executes once, `done`/`now`/
       `next` behave, `clear` cleans up triggers. Record evidence in the audit log.
-- [ ] **Spec conformance pass:** walk `DESIGN.md` invariants Inv-1…Inv-15 and confirm a test exists for
+- [ ] **Spec conformance pass:** walk `DESIGN.md` invariants Inv-1…Inv-18 and confirm a test exists for
       each; list the test name per invariant in the audit entry.
 - [ ] Finalize `CHANGELOG.md` for `1.0.0`; ensure `version = "1.0.0"`.
 - [ ] **Ship:** open PR `dev` → `main`; CI green; merge. `release-plz` opens/!updates the release PR;
@@ -626,8 +686,10 @@ tested agent skill** so agents can install and use `ccplan` — with automated c
 
 **Final Ship Gate:**
 - [ ] DoD green on clean checkout; CI green on Linux+macOS+Windows.
+- [ ] Both **Anti-gaming guards** pass (no module-scope `coverage(off)`; no real-temp-dir writes in tests).
 - [ ] 100% coverage; only sanctioned exclusions.
-- [ ] Every Inv-1…Inv-15 has a named test.
+- [ ] Every Inv-1…Inv-18 has a named test (incl. the System Invariants Inv-16/17/18).
+- [ ] All `Reviews.md` MAJOR findings resolved (backlog B-006…B-016 closed or explicitly deferred with rationale).
 - [ ] Dogfood evidence recorded.
 - [ ] `v1.0.0` tagged; release workflow produced all platform artifacts; artifacts smoke-tested.
 - [ ] Final audit entry written summarizing the whole build.
