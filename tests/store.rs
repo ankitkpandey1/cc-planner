@@ -294,6 +294,49 @@ fn archive_replaces_existing_archive_file() {
 }
 
 #[test]
+fn archive_and_purge_prune_fired_keys_for_their_date() {
+    let temp = TempDir::new().unwrap();
+    let store = Store::new(temp.path());
+
+    let today = fired_key("focus");
+    let other = FiredEventKey {
+        date: "2026-06-09".parse().unwrap(),
+        ..fired_key("focus")
+    };
+    store.check_and_set_fired(today.clone()).unwrap();
+    store.check_and_set_fired(other.clone()).unwrap();
+
+    // Archiving the day retires its fired keys, but leaves other days intact.
+    let plan = plan_with(vec![block("focus", Status::Pending)]);
+    store.set_plan(&plan, HistoryPolicy::Preserve).unwrap();
+    assert!(store.archive(&plan.date).unwrap());
+    assert_eq!(
+        store.check_and_set_fired(today.clone()).unwrap(),
+        FiredStatus::Recorded,
+        "archive should prune today's fired keys"
+    );
+    assert_eq!(
+        store.check_and_set_fired(other.clone()).unwrap(),
+        FiredStatus::AlreadyFired,
+        "archive must not touch other days' fired keys"
+    );
+
+    // Purge likewise prunes its date's fired keys.
+    store.set_plan(&plan, HistoryPolicy::Preserve).unwrap();
+    assert!(store.purge(&plan.date).unwrap());
+    assert_eq!(
+        store.check_and_set_fired(today).unwrap(),
+        FiredStatus::Recorded,
+        "purge should prune today's fired keys"
+    );
+    assert_eq!(
+        store.check_and_set_fired(other).unwrap(),
+        FiredStatus::AlreadyFired,
+        "purge must not touch other days' fired keys"
+    );
+}
+
+#[test]
 fn load_plan_reports_io_error_when_plan_path_is_directory() {
     let temp = TempDir::new().unwrap();
     let store = Store::new(temp.path());

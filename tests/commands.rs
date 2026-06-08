@@ -1453,10 +1453,41 @@ fn test_automation_dry_run_prints_command() {
 
     let output = run_ok(&context, args);
     let output_str = String::from_utf8_lossy(&output);
-    assert!(output_str.contains("dry-run: would run command"));
+    assert!(output_str.contains("dry-run:"));
+    assert!(output_str.contains("would run command"));
 
-    let log_content = std::fs::read_to_string(context.store.fire_log_path()).unwrap();
-    assert!(log_content.contains("activated run (dry-run)"));
+    // --dry-run is read-only: nothing runs, nothing is logged, the block is not activated.
+    assert!(
+        !context.store.fire_log_path().exists(),
+        "dry-run must not write a fire-log entry"
+    );
+    let stored = context.store.load_plan(&date()).unwrap().unwrap();
+    assert_eq!(stored.blocks[0].status, Status::Pending);
+    assert!(context.notifier.notifications().is_empty());
+}
+
+#[test]
+fn test_fire_dry_run_is_read_only_for_plain_activation() {
+    let (_temp, context) = test_context_at("2026-06-08T11:00:00+05:30[Asia/Kolkata]");
+    context
+        .store
+        .set_plan(&plan(), HistoryPolicy::Preserve)
+        .unwrap();
+    let rev = focus_rev(&context);
+
+    let mut args = fire_args("focus", "start", rev.as_str(), "2026-06-08T05:30:00Z");
+    args.push("--dry-run".to_owned());
+
+    let output = run_ok(&context, args);
+    let output_str = String::from_utf8_lossy(&output);
+    assert!(output_str.contains("dry-run: 2026-06-08 focus start ->"));
+    assert!(output_str.contains("Activate"));
+
+    // No side effects: the block stays pending, nothing is notified, no fire-log entry is written.
+    let stored = context.store.load_plan(&date()).unwrap().unwrap();
+    assert_eq!(stored.blocks[0].status, Status::Pending);
+    assert!(context.notifier.notifications().is_empty());
+    assert!(!context.store.fire_log_path().exists());
 }
 
 #[test]

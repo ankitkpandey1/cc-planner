@@ -181,6 +181,7 @@ dependencies = [
  "notify-rust",
  "predicates",
  "proptest",
+ "rustix",
  "serde",
  "serde_json",
  "thiserror",

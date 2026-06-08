@@ -296,7 +296,9 @@ fn apply(args: ApplyArgs, out: &mut dyn Write, context: &ContextRefs<'_>) -> Res
 }
 
 fn fire(args: &FireArgs, out: &mut dyn Write, context: &ContextRefs<'_>) -> Result<()> {
-    let _cleanup = FireCleanup;
+    // The post-fire OS cleanup (macOS launchd self-bootout) is a side effect, so a `--dry-run`
+    // preview must not arm it. `then` is lazy, so for a dry run no `FireCleanup` is constructed.
+    let _cleanup = (!args.dry_run).then(|| FireCleanup);
     let Some(mut plan) = context
         .store
         .load_plan_with_default(&args.date, context.config.notify.default_lead)?
@@ -310,6 +312,20 @@ fn fire(args: &FireArgs, out: &mut dyn Write, context: &ContextRefs<'_>) -> Resu
         return Ok(());
     }
 
+    let decision = decide_fire(
+        &plan.blocks[index],
+        args.event,
+        args.at,
+        context.clock.now().timestamp(),
+        context.policy,
+    );
+
+    // `--dry-run` is a read-only preview (like `apply --dry-run`, Inv-18): no at-most-once ledger
+    // write, no notification, no status persistence, no fire-log entry — just report the decision.
+    if args.dry_run {
+        return preview_fire(out, args, &plan.blocks[index], &decision);
+    }
+
     let key = FiredEventKey {
         date: args.date.clone(),
         block_id: args.id.clone(),
@@ -321,13 +337,6 @@ fn fire(args: &FireArgs, out: &mut dyn Write, context: &ContextRefs<'_>) -> Resu
         return Ok(());
     }
 
-    let decision = decide_fire(
-        &plan.blocks[index],
-        args.event,
-        args.at,
-        context.clock.now().timestamp(),
-        context.policy,
-    );
     let mut log_line = format!("{} {} {}", args.date, args.id, args.event);
 
     // We run the match and if it errors, we STILL want to write the log line if we constructed one
@@ -341,15 +350,9 @@ fn fire(args: &FireArgs, out: &mut dyn Write, context: &ContextRefs<'_>) -> Resu
             log_notify(context, &plan.blocks[index], &mut log_line);
             Ok(())
         }
-        FireDecision::Activate { run } => activate_block(
-            context,
-            &mut plan,
-            index,
-            run,
-            args.dry_run,
-            out,
-            &mut log_line,
-        ),
+        FireDecision::Activate { run } => {
+            activate_block(context, &mut plan, index, run, &mut log_line)
+        }
         FireDecision::MarkMissed => mark_missed(context.store, &mut plan, index, &mut log_line),
         FireDecision::Close { status } => {
             close_block(context.store, &mut plan, index, status, &mut log_line)
@@ -358,6 +361,32 @@ fn fire(args: &FireArgs, out: &mut dyn Write, context: &ContextRefs<'_>) -> Resu
 
     append_fire_log(context.store, &log_line)?;
     result
+}
+
+/// Reports the decision a real `fire` would take, without any side effect.
+///
+/// Mirrors the human preview of `apply --dry-run`: the scheduler-invoked fire path is the one place
+/// that runs `run:` automation, marks blocks, and notifies, so a dry run must touch nothing.
+fn preview_fire(
+    out: &mut dyn Write,
+    args: &FireArgs,
+    block: &Block,
+    decision: &FireDecision,
+) -> Result<()> {
+    let action = match decision {
+        // The one case worth spelling out: the argv a real fire would execute.
+        FireDecision::Activate { run: true } if block.run.is_some() => {
+            let command = block.run.as_ref().map_or(&[][..], Run::as_slice);
+            format!("would run command: {command:?}")
+        }
+        other => format!("{other:?}"),
+    };
+    let line = format!(
+        "dry-run: {} {} {} -> {action}",
+        args.date, args.id, args.event
+    );
+    writeln!(out, "{line}")?;
+    Ok(())
 }
 
 struct FireCleanup;
@@ -741,18 +770,10 @@ fn check_plan_file_security(path: &Path) -> Result<()> {
             "plan file is group- or world-writable (mode: {mode:o})"
         )));
     }
-    let output = std::process::Command::new("id").arg("-u").output();
-    let uid = match output {
-        Ok(out) if out.status.success() => {
-            let s = String::from_utf8_lossy(&out.stdout);
-            s.trim().parse::<u32>().unwrap_or(u32::MAX)
-        }
-        _ => {
-            return Err(Error::AutomationRefused(
-                "failed to determine current user UID".to_string(),
-            ));
-        }
-    };
+    // Resolve the current UID via a safe syscall wrapper rather than spawning `id` (which is
+    // PATH-resolved and brittle in a scheduler-invoked process). `rustix::process::getuid` is
+    // infallible and needs no `unsafe`, preserving the crate-wide `#![forbid(unsafe_code)]`.
+    let uid = rustix::process::getuid().as_raw();
     if metadata.uid() != uid {
         return Err(Error::AutomationRefused(format!(
             "plan file is not owned by the current user (file uid: {}, current uid: {})",
@@ -808,8 +829,6 @@ fn activate_block(
     plan: &mut Plan,
     index: usize,
     run: bool,
-    dry_run: bool,
-    out: &mut dyn Write,
     log_line: &mut String,
 ) -> Result<()> {
     plan.blocks[index].status = Status::Active;
@@ -842,9 +861,6 @@ fn activate_block(
             {
                 let _ = write!(log_line, " run-refused: {error}");
                 deferred = Some(error);
-            } else if dry_run {
-                writeln!(out, "dry-run: would run command: {argv:?}")?;
-                let _ = write!(log_line, " activated run (dry-run): argv={argv:?}");
             } else {
                 let report = execute_run(argv, context.config.automation.timeout);
                 let _ = write!(

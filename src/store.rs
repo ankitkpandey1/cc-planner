@@ -185,6 +185,7 @@ impl Store {
             map_io_result(fs::remove_file(&archive_path), &archive_path)?;
         }
         map_io_result(fs::rename(&plan_path, &archive_path), &archive_path)?;
+        self.prune_fired_for_date(date)?;
         Ok(true)
     }
 
@@ -201,6 +202,7 @@ impl Store {
                 removed = true;
             }
         }
+        self.prune_fired_for_date(date)?;
         Ok(removed)
     }
 
@@ -220,6 +222,23 @@ impl Store {
         ledger.fired.push(key);
         write_fired_ledger(&path, &ledger)?;
         Ok(FiredStatus::Recorded)
+    }
+
+    /// Drops every fired-event key recorded for a date.
+    ///
+    /// The fired ledger is otherwise append-only (`check_and_set_fired` never removes), so without
+    /// this it would grow without bound and every fire would re-read and re-scan the whole file.
+    /// `archive`/`purge` retire a day's plan, so its fired keys can never be consulted again — they
+    /// are pruned here under the same lock the callers already hold.
+    fn prune_fired_for_date(&self, date: &PlanDate) -> Result<(), StoreError> {
+        let path = self.fired_path();
+        let mut ledger = read_fired_ledger(&path)?;
+        let before = ledger.fired.len();
+        ledger.fired.retain(|key| &key.date != date);
+        if ledger.fired.len() != before {
+            write_fired_ledger(&path, &ledger)?;
+        }
+        Ok(())
     }
 
     /// Records or replaces an owned trigger descriptor.
@@ -485,17 +504,39 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), StoreError> {
     map_io_result(file.write_all(bytes), &temp_path)?;
     map_io_result(file.sync_all(), &temp_path)?;
     drop(file);
-    map_io_result(fs::rename(&temp_path, path), path)
+    map_io_result(fs::rename(&temp_path, path), path)?;
+    sync_parent_dir(path);
+    Ok(())
 }
 
+/// Persists the directory entry produced by `atomic_write`'s rename so the atomic replace survives a
+/// crash. fsyncing the file alone leaves the rename itself only in the page cache on POSIX; this
+/// flushes the containing directory. Best-effort: a failure here can't corrupt data (the rename has
+/// already happened), so it must not turn a successful write into an error.
+#[cfg(unix)]
+fn sync_parent_dir(path: &Path) {
+    // Best-effort: opening the directory and fsyncing it can't fail in a way that corrupts data
+    // (the rename has already landed), so any error is intentionally discarded.
+    let _ = File::open(resolved_parent(path)).map(|dir| dir.sync_all());
+}
+
+// Windows has no portable directory-fsync; NTFS metadata durability is handled by the OS.
+#[cfg(not(unix))]
+fn sync_parent_dir(_path: &Path) {}
+
 fn ensure_parent(path: &Path) -> Result<(), StoreError> {
+    let parent = resolved_parent(path);
+    map_io_result(fs::create_dir_all(parent), parent)
+}
+
+/// Resolves the directory a file lives in, treating a bare filename (empty parent) as the CWD.
+fn resolved_parent(path: &Path) -> &Path {
     let parent = path.parent().unwrap_or(Path::new("."));
-    let parent = if parent.as_os_str().is_empty() {
+    if parent.as_os_str().is_empty() {
         Path::new(".")
     } else {
         parent
-    };
-    map_io_result(fs::create_dir_all(parent), parent)
+    }
 }
 
 fn remove_file_if_exists(path: &Path) -> Result<bool, StoreError> {

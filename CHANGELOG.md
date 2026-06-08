@@ -6,6 +6,28 @@ This project follows Keep a Changelog and uses Semantic Versioning.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Fired-event ledger no longer grows without bound.** `archive` and `purge` now prune the
+  fired-event keys recorded for their date. The ledger was previously append-only, so it grew
+  indefinitely and every `fire` re-read and re-scanned the whole file.
+- **Atomic writes now fsync the parent directory** (Unix) after the rename, so the atomic replace
+  itself — not just the file contents — is durable across a crash.
+- **`fire --dry-run` is now genuinely read-only.** It previews the decision a real fire would take
+  without recording the at-most-once ledger entry, sending a notification, persisting the block's
+  status, or writing a fire-log entry — matching the side-effect-free contract of `apply --dry-run`.
+
+### Changed
+
+- Reworded the `scheduler`/`notifier` "unavailable" errors to drop internal development-stage
+  language ("until Stage 5") in favor of a platform-availability message.
+
+### Security
+
+- The `run:` automation plan-file ownership check now resolves the current UID via a safe `getuid`
+  syscall wrapper instead of spawning `id -u`, removing a `PATH`-resolved subprocess from the
+  security gate of a scheduler-invoked process.
+
 ## [1.0.0] - 2026-06-08
 
 ### Added

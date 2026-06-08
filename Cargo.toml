@@ -99,5 +99,9 @@ build = ["bash", "scripts/build-release-assets.sh"]
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(coverage,coverage_nightly)'] }
 
+[target.'cfg(unix)'.dependencies]
+# Safe `getuid` for the run: automation plan-file ownership check (no subprocess, no unsafe).
+rustix = { version = "1", features = ["process"] }
+
 [target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
 notify-rust = { version = "4", default-features = false, features = ["d_vendored"] }

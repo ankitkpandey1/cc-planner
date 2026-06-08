@@ -119,7 +119,7 @@ pub struct Notification {
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum SchedulerError {
-    #[error("scheduler backend is unavailable until Stage 5")]
+    #[error("scheduler backend is unavailable on this platform")]
     Unavailable,
     #[error("scheduler operation failed: {0}")]
     Operation(String),
@@ -127,7 +127,7 @@ pub enum SchedulerError {
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum NotifyError {
-    #[error("notifier backend is unavailable until Stage 5")]
+    #[error("notifier backend is unavailable on this platform")]
     Unavailable,
     #[error("notification failed: {0}")]
     Operation(String),
