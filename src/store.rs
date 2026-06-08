@@ -139,6 +139,34 @@ impl Store {
         Ok(merged)
     }
 
+    /// Runs a read-modify-write transaction for a date under the exclusive lock (Inv-17).
+    ///
+    /// Loads the plan (or `None`), hands it to `mutate`, then merges the result with the
+    /// preserve-terminal-history policy and writes it — holding the lock for the entire
+    /// load→mutate→write window. This serializes concurrent mutations so two writers editing the
+    /// same day cannot lose each other's blocks (the load-outside-the-lock-then-`set` race that a
+    /// plain `load_plan` + `set_plan` pair is subject to).
+    ///
+    /// The closure's error type `E` need only absorb `StoreError` (`E: From<StoreError>`), so
+    /// command-layer errors flow straight through without a manual conversion at each call site.
+    ///
+    /// # Errors
+    ///
+    /// Returns the closure's error, or a `StoreError` (lock contention, invalid plan,
+    /// terminal-history conflict, or I/O) surfaced through `E`.
+    pub fn update<F, E>(&self, date: &PlanDate, default_lead: Lead, mutate: F) -> Result<Plan, E>
+    where
+        F: FnOnce(Option<Plan>) -> Result<Plan, E>,
+        E: From<StoreError>,
+    {
+        let _lock = self.try_lock()?;
+        let existing = self.load_plan_unlocked_with_default(date, default_lead)?;
+        let next = mutate(existing)?;
+        let merged = self.merge_plan_with_default(&next, HistoryPolicy::Preserve, default_lead)?;
+        self.write_plan_unlocked(&merged)?;
+        Ok(merged)
+    }
+
     /// Moves the canonical plan for a date to the archive directory.
     ///
     /// # Errors

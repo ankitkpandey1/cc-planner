@@ -12,7 +12,7 @@ use ccplan::{
         TimeZoneName,
     },
     run_with_context,
-    store::{HistoryPolicy, Store, TriggerRecord},
+    store::{HistoryPolicy, Store, StoreError, TriggerRecord},
     time::FixedClock,
 };
 use clap::Parser;
@@ -323,6 +323,17 @@ fn add_edit_and_status_errors_cover_conflict_paths() {
     let (_temp, empty_context) = test_context_at("2026-06-08T10:00:00+05:30[Asia/Kolkata]");
     let err = run_err(&empty_context, ["ccplan", "show", "--date", "2026-06-08"]);
     assert_eq!(err.exit_code(), 3);
+
+    // Mutations against a date with no plan at all must report NotFound (exit 3) — this exercises
+    // the transactional update's "no existing plan" branch (required_plan's None case).
+    for command in [
+        vec!["ccplan", "done", "ghost"],
+        vec!["ccplan", "edit", "ghost", "--title", "Ghost"],
+        vec!["ccplan", "rm", "ghost"],
+    ] {
+        let err = run_err(&empty_context, command);
+        assert_eq!(err.exit_code(), 3);
+    }
 }
 
 #[test]
@@ -905,6 +916,67 @@ fn status_reports_scheduler_list_failures_without_failing() {
     let output = String::from_utf8(run_ok(&context, ["ccplan", "status"])).unwrap();
 
     assert!(output.contains("live triggers: unavailable"));
+}
+
+#[test]
+fn store_update_serializes_concurrent_additive_writes_without_loss() {
+    use std::sync::Arc;
+
+    // Inv-17: Store::update holds the lock across load->mutate->write, so two writers each
+    // appending a different block to the same day cannot lose each other's work. Eight threads
+    // race to add distinct, non-overlapping blocks; on lock contention a writer simply retries.
+    let temp = TempDir::new().unwrap();
+    let store = Arc::new(Store::new(temp.path()));
+    let day = date();
+    store
+        .set_plan(
+            &Plan {
+                date: day.clone(),
+                timezone: "Asia/Kolkata".parse().unwrap(),
+                blocks: Vec::new(),
+            },
+            HistoryPolicy::Preserve,
+        )
+        .unwrap();
+
+    let handles = (0..8u32)
+        .map(|i| {
+            let store = Arc::clone(&store);
+            let day = day.clone();
+            std::thread::spawn(move || {
+                let block = block_with(
+                    &format!("b{i}"),
+                    "Concurrent",
+                    &format!("{:02}:00", 8 + i),
+                    Span::Duration(DurationSpec::from_seconds(30 * 60).unwrap()),
+                );
+                loop {
+                    let block = block.clone();
+                    let outcome =
+                        store.update(&day, Lead::from_seconds(0).unwrap(), move |existing| {
+                            let mut plan = existing.expect("seed plan is present");
+                            plan.blocks.push(block);
+                            Ok::<_, StoreError>(plan)
+                        });
+                    match outcome {
+                        Ok(_) => break,
+                        Err(StoreError::Locked) => std::thread::yield_now(),
+                        Err(error) => panic!("unexpected store error: {error}"),
+                    }
+                }
+            })
+        })
+        .collect::<Vec<_>>();
+    for handle in handles {
+        handle.join().unwrap();
+    }
+
+    let stored = store.load_plan(&day).unwrap().unwrap();
+    assert_eq!(
+        stored.blocks.len(),
+        8,
+        "no concurrent additive write was lost"
+    );
 }
 
 fn run_ok<C, S, N, I, T>(context: &Context<C, S, N>, args: I) -> Vec<u8>

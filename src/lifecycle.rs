@@ -94,7 +94,7 @@ impl LifecyclePolicy {
 pub enum FireDecision {
     NoOp,
     Notify,
-    Activate { notify: bool, run: bool },
+    Activate { run: bool },
     MarkMissed,
     Close { status: Status },
 }
@@ -152,7 +152,6 @@ fn decide_start(
         FireDecision::MarkMissed
     } else {
         FireDecision::Activate {
-            notify: true,
             run: block.run.is_some(),
         }
     }

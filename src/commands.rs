@@ -75,7 +75,6 @@ fn set(args: SetArgs, out: &mut dyn Write, context: &ContextRefs<'_>) -> Result<
 
 fn add(args: AddArgs, context: &ContextRefs<'_>) -> Result<()> {
     let date = args.date.unwrap_or_else(|| today(context));
-    let mut plan = load_or_new_plan(context.store, &date, context)?;
     let id = match args.id {
         Some(id) => id,
         None => slug_block_id(&args.title)?,
@@ -91,84 +90,85 @@ fn add(args: AddArgs, context: &ContextRefs<'_>) -> Result<()> {
         run: run_from(args.run)?,
     };
 
-    match plan.blocks.iter().position(|existing| existing.id == id) {
-        Some(index) if plan.blocks[index].status.is_terminal() => {
-            Err(Error::HistoryConflict { id })
+    // The whole load→mutate→write runs under the store lock (Inv-17), so a concurrent writer
+    // adding a different block to the same day cannot be lost.
+    update_plan(context, &date, |existing| {
+        let mut plan = match existing {
+            Some(plan) => plan,
+            None => empty_plan(date.clone(), timezone_from_clock(context)?),
+        };
+        match plan.blocks.iter().position(|existing| existing.id == id) {
+            Some(index) if plan.blocks[index].status.is_terminal() => {
+                return Err(Error::HistoryConflict { id });
+            }
+            Some(index) => plan.blocks[index] = block,
+            None => plan.blocks.push(block),
         }
-        Some(index) => replace_block(
-            context.store,
-            &mut plan,
-            index,
-            block,
-            context.config.notify.default_lead,
-        ),
-        None => insert_block(
-            context.store,
-            &mut plan,
-            block,
-            context.config.notify.default_lead,
-        ),
-    }
+        Ok(plan)
+    })
 }
 
 fn edit(args: EditArgs, context: &ContextRefs<'_>) -> Result<()> {
     let date = args.date.unwrap_or_else(|| today(context));
-    let mut plan = load_required(context.store, &date, context.config.notify.default_lead)?;
-    let block = find_block_mut(&mut plan, &args.id)?;
-    ensure_non_terminal(block)?;
-
-    if let Some(title) = args.title {
-        block.title = title;
-    }
-    if let Some(start) = args.start {
-        block.start = start;
-    }
     if args.end.is_some() && args.duration.is_some() {
         return Err(Error::Usage(
             "edit accepts only one of --end or --duration".to_owned(),
         ));
     }
-    if let Some(end) = args.end {
-        block.span = Span::End(end);
-    }
-    if let Some(duration) = args.duration {
-        block.span = Span::Duration(duration);
-    }
-    if let Some(notify) = args.notify {
-        block.notify = notify;
-    }
-    if !args.run.is_empty() {
-        block.run = Some(Run::new(args.run)?);
-    }
 
-    persist_plan(context, &plan)?;
-    Ok(())
+    update_plan(context, &date, |existing| {
+        let mut plan = required_plan(existing, &date)?;
+        let block = find_block_mut(&mut plan, &args.id)?;
+        ensure_non_terminal(block)?;
+
+        if let Some(title) = args.title {
+            block.title = title;
+        }
+        if let Some(start) = args.start {
+            block.start = start;
+        }
+        if let Some(end) = args.end {
+            block.span = Span::End(end);
+        }
+        if let Some(duration) = args.duration {
+            block.span = Span::Duration(duration);
+        }
+        if let Some(notify) = args.notify {
+            block.notify = notify;
+        }
+        if !args.run.is_empty() {
+            block.run = Some(Run::new(args.run)?);
+        }
+        Ok(plan)
+    })
 }
 
 fn remove(id: &BlockId, context: &ContextRefs<'_>) -> Result<()> {
     let date = today(context);
-    let mut plan = load_required(context.store, &date, context.config.notify.default_lead)?;
-    let index = plan
-        .blocks
-        .iter()
-        .position(|block| &block.id == id)
-        .ok_or_else(|| Error::NotFound(format!("block `{id}`")))?;
-    ensure_non_terminal(&plan.blocks[index])?;
-    plan.blocks.remove(index);
-    persist_plan(context, &plan)?;
-    Ok(())
+    update_plan(context, &date, |existing| {
+        let mut plan = required_plan(existing, &date)?;
+        let index = plan
+            .blocks
+            .iter()
+            .position(|block| &block.id == id)
+            .ok_or_else(|| Error::NotFound(format!("block `{id}`")))?;
+        ensure_non_terminal(&plan.blocks[index])?;
+        plan.blocks.remove(index);
+        Ok(plan)
+    })
 }
 
 fn set_status(id: BlockId, status: Status, context: &ContextRefs<'_>) -> Result<()> {
     let date = today(context);
-    let mut plan = load_required(context.store, &date, context.config.notify.default_lead)?;
-    let block = find_block_mut(&mut plan, &id)?;
-    if block.status.is_terminal() && block.status != status {
-        return Err(Error::HistoryConflict { id });
-    }
-    block.status = status;
-    persist_plan(context, &plan)?;
-    Ok(())
+    update_plan(context, &date, |existing| {
+        let mut plan = required_plan(existing, &date)?;
+        let block = find_block_mut(&mut plan, &id)?;
+        if block.status.is_terminal() && block.status != status {
+            return Err(Error::HistoryConflict { id });
+        }
+        block.status = status;
+        Ok(plan)
+    })
 }
 
 fn clear(args: ClearArgs, out: &mut dyn Write, context: &ContextRefs<'_>) -> Result<()> {
@@ -336,11 +336,10 @@ fn fire(args: &FireArgs, out: &mut dyn Write, context: &ContextRefs<'_>) -> Resu
             log_notify(context, &plan.blocks[index], &mut log_line);
             Ok(())
         }
-        FireDecision::Activate { notify, run } => activate_block(
+        FireDecision::Activate { run } => activate_block(
             context,
             &mut plan,
             index,
-            notify,
             run,
             args.dry_run,
             out,
@@ -394,14 +393,6 @@ fn read_plan_input(source: &str) -> Result<String> {
     }
 }
 
-fn load_or_new_plan(store: &Store, date: &PlanDate, context: &ContextRefs<'_>) -> Result<Plan> {
-    if let Some(plan) = store.load_plan_with_default(date, context.config.notify.default_lead)? {
-        return Ok(plan);
-    }
-    let timezone = timezone_from_clock(context)?;
-    Ok(empty_plan(date.clone(), timezone))
-}
-
 fn empty_plan(date: PlanDate, timezone: TimeZoneName) -> Plan {
     Plan {
         date,
@@ -410,22 +401,23 @@ fn empty_plan(date: PlanDate, timezone: TimeZoneName) -> Plan {
     }
 }
 
-fn replace_block(
-    store: &Store,
-    plan: &mut Plan,
-    index: usize,
-    block: Block,
-    default_lead: Lead,
-) -> Result<()> {
-    plan.blocks[index] = block;
-    store.set_plan_with_default(plan, HistoryPolicy::Preserve, default_lead)?;
-    Ok(())
+/// Runs a mutating command as one transactional read-modify-write under the store lock (Inv-17).
+///
+/// Threads the configured default notify lead and discards the merged plan the store returns; the
+/// caller's `mutate` closure produces the new plan from the loaded one (or `None` when absent).
+fn update_plan<F>(context: &ContextRefs<'_>, date: &PlanDate, mutate: F) -> Result<()>
+where
+    F: FnOnce(Option<Plan>) -> Result<Plan>,
+{
+    context
+        .store
+        .update(date, context.config.notify.default_lead, mutate)
+        .map(|_| ())
 }
 
-fn insert_block(store: &Store, plan: &mut Plan, block: Block, default_lead: Lead) -> Result<()> {
-    plan.blocks.push(block);
-    store.set_plan_with_default(plan, HistoryPolicy::Preserve, default_lead)?;
-    Ok(())
+/// Unwraps the plan a mutation loaded, turning "no plan for this date" into a `NotFound` error.
+fn required_plan(existing: Option<Plan>, date: &PlanDate) -> Result<Plan> {
+    existing.ok_or_else(|| Error::NotFound(format!("plan for {date}")))
 }
 
 fn load_required(store: &Store, date: &PlanDate, default_lead: Lead) -> Result<Plan> {
@@ -484,16 +476,18 @@ fn read_reconciled_plan(context: &ContextRefs<'_>, date: &PlanDate) -> Result<Pl
     Ok(plan)
 }
 
-/// Loads, reconciles overdue blocks, and **persists** the result if anything changed.
+/// Loads, reconciles overdue blocks, and **persists** the result transactionally.
 ///
-/// Used by `apply`, which is a legitimate mutation point. Only writes when reconciliation actually
-/// changed a status, so a no-op `apply` leaves the file untouched.
+/// Used by `apply`, a legitimate mutation point. Runs under the store lock (Inv-17) so reconciling
+/// overdue blocks can't clobber a block a concurrent writer added to the same day.
 fn reconciled_plan(context: &ContextRefs<'_>, date: &PlanDate) -> Result<Plan> {
-    let mut plan = load_required(context.store, date, context.config.notify.default_lead)?;
-    if apply_overdue_in_memory(context, &mut plan)? {
-        persist_plan(context, &plan)?;
-    }
-    Ok(plan)
+    context
+        .store
+        .update(date, context.config.notify.default_lead, |existing| {
+            let mut plan = required_plan(existing, date)?;
+            apply_overdue_in_memory(context, &mut plan)?;
+            Ok(plan)
+        })
 }
 
 fn desired_triggers(plan: &Plan, now: Timestamp) -> Result<Vec<TriggerRecord>> {
@@ -796,25 +790,23 @@ fn authorize_run(
 /// so our own write can't change the perms/ownership the security probe inspects. A refused/failed
 /// run is still persisted as `active` (DESIGN §11) and surfaced as the exit code. Policy decisions
 /// are pure (`authorize_run`); only the file-security probe and process spawn are IO.
-#[allow(clippy::too_many_arguments)]
 fn activate_block(
     context: &ContextRefs<'_>,
     plan: &mut Plan,
     index: usize,
-    do_notify: bool,
     run: bool,
     dry_run: bool,
     out: &mut dyn Write,
     log_line: &mut String,
 ) -> Result<()> {
     plan.blocks[index].status = Status::Active;
-    if do_notify {
-        log_notification_result(
-            send_notification(context, &plan.blocks[index]),
-            "",
-            log_line,
-        );
-    }
+    // Per DESIGN §6.3 the `start` event always notifies (the separate heads-up `notify` trigger,
+    // when scheduled, fires at an earlier, distinct instant — so this is not a double-notify).
+    log_notification_result(
+        send_notification(context, &plan.blocks[index]),
+        "",
+        log_line,
+    );
 
     // Validate + run automation against the plan file *as loaded*, before persisting our own
     // activation write (which would otherwise replace the file's perms/ownership under the

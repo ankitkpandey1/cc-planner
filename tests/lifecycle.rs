@@ -67,13 +67,7 @@ fn fire_start_on_time_activates_without_run() {
         policy(EndBehavior::Expire),
     );
 
-    assert_eq!(
-        decision,
-        FireDecision::Activate {
-            notify: true,
-            run: false
-        }
-    );
+    assert_eq!(decision, FireDecision::Activate { run: false });
 }
 
 #[test]
@@ -91,13 +85,7 @@ fn fire_start_on_time_includes_run_when_block_has_run() {
         policy(EndBehavior::Expire),
     );
 
-    assert_eq!(
-        decision,
-        FireDecision::Activate {
-            notify: true,
-            run: true
-        }
-    );
+    assert_eq!(decision, FireDecision::Activate { run: true });
 }
 
 #[test]
@@ -211,13 +199,7 @@ fn grace_boundary_is_on_time_and_next_second_is_overdue() {
         policy(EndBehavior::Expire),
     );
 
-    assert_eq!(
-        inside,
-        FireDecision::Activate {
-            notify: true,
-            run: false
-        }
-    );
+    assert_eq!(inside, FireDecision::Activate { run: false });
     assert_eq!(outside, FireDecision::MarkMissed);
 }
 
