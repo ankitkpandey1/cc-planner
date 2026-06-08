@@ -62,7 +62,9 @@ jobs:
         uses: codecov/codecov-action@v7
         with:
           files: codecov.json
-          fail_ci_if_error: true
+          # cargo-llvm-cov above is the blocking 100% gate; Codecov upload can
+          # fail until the repository is activated/configured in Codecov.
+          fail_ci_if_error: false
           use_oidc: true
 
   deny:

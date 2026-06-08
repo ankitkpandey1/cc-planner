@@ -231,6 +231,10 @@ Tooling (installed in CI, not deps): `cargo-llvm-cov`, `cargo-deny`, `cargo-dist
 - The original pinned CI note said `codecov/codecov-action@v5`; the current Codecov README documents
   `v7` with a wrapper/key update. The v5 upload failed in CI because the uploader signature key could
   not be verified, so Stage 0 uses `codecov/codecov-action@v7`.
+- Codecov v7 then reached the service with a valid OIDC token and `codecov.json`, but the service
+  returned `Repository not found`; the upload step is non-blocking until the repo is activated/configured
+  in Codecov. The blocking coverage quality gate remains `cargo +nightly llvm-cov --fail-under-lines
+  100`.
 
 ### 2026-06-08 — review round 4 fixes + agent skill (D20)
 - Final-v1 → version/tag/artifacts are **v1.0.0** (was v0.1.0) everywhere.
