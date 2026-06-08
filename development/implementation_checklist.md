@@ -720,7 +720,7 @@ tested agent skill** so agents can install and use `ccplan` — with automated c
 | 4 | CLI surface & command logic | [x] | 83 | 2026-06-08 | `0d816d3` |
 | 5 | Native backends & doctor | [x] | — | 2026-06-08 | `7410f0d` |
 | 6 | run: automation & security | [x] | 128 | 2026-06-08 | `b3ab747` + correction pass (`1add9be`…`cfe8fb3`) |
-| 7 | Completions & man page | [x] | 131 | 2026-06-08 | pending commit |
+| 7 | Completions & man page | [x] | 131 | 2026-06-08 | `41b144a` |
 | 8 | OSS hygiene & release | [ ] | | | |
 | 9 | Production readiness & ship | [ ] | | | |
 

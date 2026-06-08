@@ -1106,7 +1106,7 @@ B-015 (`is_lock_contention` narrowing), B-016 (status overcount).
 
 ## Stage 7 — CLI niceties: completions & man page — 2026-06-08
 
-**Commit(s):** local changes (to be committed)   ·   **Branch:** dev
+**Commit(s):** `41b144a`   ·   **Branch:** dev
 
 ### A. Recon summary
 - Re-read `development/goal_prompt.md`, `development/notes.md`, `development/backlog.md`,
