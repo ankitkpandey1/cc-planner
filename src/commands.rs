@@ -764,6 +764,9 @@ fn check_plan_file_security(path: &Path) -> Result<()> {
 }
 
 #[cfg(not(unix))]
+// Non-Unix platforms have no equivalent of Unix file permission/ownership checks.
+// The caller's return type is Result<()> on all platforms so call sites are uniform.
+#[allow(clippy::unnecessary_wraps)]
 fn check_plan_file_security(_path: &Path) -> Result<()> {
     Ok(())
 }
