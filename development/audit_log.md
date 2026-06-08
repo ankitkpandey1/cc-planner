@@ -1377,3 +1377,179 @@ B-015 (`is_lock_contention` narrowing), B-016 (status overcount).
 - [x] README badges point at real CI/coverage/crates/license.
 - [x] cargo-deny clean with no advisory/unmaintained allowlist entries.
 - [x] DoD green; notes, backlog, checklist, and audit updated.
+
+---
+
+## Stage 9 — Production readiness & ship v1.0.0 — 2026-06-09
+
+**Commit(s):** (see below)   ·   **Branch:** dev
+
+### A. Recon summary
+- Re-read `development/notes.md` in full, `development/backlog.md`, `implementation_checklist.md`
+  (Stages 0–8 all checked), `Reviews.md` (MAJOR findings M1/M2/M3 resolved in B-006/007/008),
+  and `DESIGN.md` (full Inv-1…Inv-18 section).
+- Current stage confirmed: Stage 9, all prior gates green.
+- Open backlog: B-003/B-004/B-009/B-010/B-013/B-015/B-016 (P2/P3, none is a blocker) — deferred
+  explicitly with rationale in `backlog.md` per the ship-gate requirement.
+
+### B. What was built
+- No new code changes. Stage 9 is a verification, finalization, and ship stage.
+- **CHANGELOG.md** finalized: `[Unreleased]` emptied; `[1.0.0]` entry expanded to cover all features
+  (CLI surface, native schedulers, run: automation, DST-correct time, shell completions, agent skill,
+  release automation, OSS hygiene, quality gate).
+- **`backlog.md`** updated: all open items (B-003/B-004/B-009/B-010/B-013/B-015/B-016) explicitly
+  deferred to post-v1.0.0 with one-line rationale each; moved to Resolved section.
+- **`implementation_checklist.md`**: Stage 9 steps checked off; progress tracker updated.
+- **`development/notes.md`**: Stage 9 learnings appended.
+
+### C. Self-review findings & fixes
+- `status` shows "live triggers: 18" during dogfood because two separate CCPLAN_ROOT stores both
+  created timers before the second was cleared — not a code bug, just a multi-store artifact.
+  Cleaned up both stores by the end of the dogfood session.
+- `done`/`skip` have no `--date` (B-013) — confirmed during dogfood; deferred to post-v1.0.0.
+- CHANGELOG [Unreleased] had Stage 8 items that were never moved into [1.0.0]; corrected in finalization.
+
+### D. Evidence (paste real output)
+
+**DoD gate (local, 2026-06-09):**
+
+```
+cargo fmt --all -- --check
+→ (no output = clean)
+
+cargo clippy --all-targets --all-features -- -D warnings
+→ Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.23s
+
+cargo test --all-features --workspace
+→ test result: ok. 38 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; (lib unit tests)
+   test result: ok. 0 passed; 0 failed; 0 ignored (main + ccplan-fire binary tests)
+   test result: ok. 3 passed; 0 failed; 0 ignored (agent_docs.rs)
+   test result: ok. 1 passed; 0 failed; 0 ignored (apply_properties.rs)
+   test result: ok. 6 passed; 0 failed; 0 ignored (cli.rs)
+   test result: ok. 26 passed; 0 failed; 0 ignored (commands.rs)
+   test result: ok. 0 passed; 0 failed; 1 ignored (integration_linux.rs — sanctioned)
+   test result: ok. 13 passed; 0 failed; 0 ignored (lifecycle.rs)
+   test result: ok. 2 passed; 0 failed; 0 ignored (lifecycle_properties.rs)
+   test result: ok. 13 passed; 0 failed; 0 ignored (model.rs)
+   test result: ok. 3 passed; 0 failed; 0 ignored (properties.rs)
+   test result: ok. 3 passed; 0 failed; 0 ignored (release_docs.rs)
+   test result: ok. 24 passed; 0 failed; 0 ignored (store.rs)
+   test result: ok. 1 passed; 0 failed; 0 ignored (store_properties.rs)
+   test result: ok. 4 passed; 0 failed; 0 ignored (time.rs)
+TOTAL: 137 passed; 0 failed; 1 ignored (sanctioned); 0 filtered out
+Test-count guard: 137 ≥ 137 (Stage 8 count). PASS.
+
+RUSTFLAGS="--cfg coverage_nightly" cargo +nightly llvm-cov --all-features --workspace --fail-under-lines 100
+→ Lines: 2434/2434 = 100.00% — exit code 0. PASS.
+   (Regions 96.88% — region coverage is not the gate metric; --fail-under-lines checks lines only.)
+
+cargo deny check
+→ advisories ok, bans ok, licenses ok, sources ok
+
+cargo build --release
+→ Finished `release` profile [optimized] target(s) in 0.10s
+```
+
+**Anti-gaming guards:**
+```
+# Guard 1 — no module-scope coverage(off):
+→ PASS: no module-scope coverage(off) found
+
+# Guard 2 — no env::temp_dir() in tests:
+→ PASS: no real temp_dir in tests
+```
+
+**Coverage exclusions (sanctioned only):**
+- `main.rs` shim `#[cfg_attr(coverage_nightly, coverage(off))]` — main is not business logic
+- `src/bin/ccplan-fire.rs` shim — same
+- `SystemClock::now()` — real time I/O, not injectable
+- `Store::for_user()` — reads OS dirs, not injectable
+- Platform IO methods in `platform/{systemd,launchd,schtasks,notify}.rs` (fn-level) — real OS calls
+- `unreachable!()` arms in pure core — defensive, not reachable
+
+**Dogfood evidence (2026-06-09, Linux, CCPLAN_ROOT=/tmp/dogfood-stage9-today, isolated store):**
+
+```
+# Authored today's plan via stdin:
+CCPLAN_ROOT=... ccplan set --from -
+→ stored 2026-06-09  exit: 0
+
+# Applied to create systemd timers:
+CCPLAN_ROOT=... ccplan apply
+→ add 2026-06-09-812867e6f7-...-end/notify/start (dogfood-a, 3 triggers)
+   add 2026-06-09-86724717ad-...-end/notify/start (dogfood-b, 3 triggers)
+   exit: 0
+
+# Verified timers in systemd:
+systemctl --user list-timers 'ccplan-*' --all
+→ 6 timers listed for today (00:06 notify, 00:08 start, 00:28 end for block-a;
+                              00:28 notify, 00:33 start, 01:03 end for block-b)
+
+# Read commands:
+ccplan now --json  → []  (no current blocks — before start time)
+ccplan next --json → [{"id":"dogfood-a","title":"Dogfood Block A","start":"00:08",...}]
+ccplan agenda      → TABLE with countdown column
+
+# Lifecycle commands:
+ccplan done dogfood-a   → exit 0; block marked done
+ccplan skip dogfood-b   → exit 0; block marked skipped
+ccplan next --json      → []  (all blocks terminal)
+
+# Apply convergence after terminal blocks:
+ccplan apply --dry-run  → remove 6 triggers (all blocks now terminal)
+ccplan apply            → remove 6 triggers; exit 0
+systemctl list-timers   → 0 timers for today
+
+# Clear:
+ccplan clear --yes      → "no changes" (already reconciled); exit 0
+                          plan archived, triggers gone
+```
+
+Note: Notifications fire via systemd transient timers. The near-future timer schedule was verified
+as created; actual notification delivery at fire time was verified in Stage 5 dogfood (IST 17:53–17:55
+run recorded in Stage 5 notes). No allow-listed `run:` block was included in Stage 9 dogfood because
+it would require a real binary path and allowlist config — the `run:` policy matrix is exercised by
+the test suite (test_automation_refused_when_* / test_automation_runs_and_kills_on_timeout).
+
+### E. Spec conformance pass — Inv-1…Inv-18
+
+Every DESIGN.md invariant has at least one named test:
+
+| Invariant | Property | Test(s) |
+|-----------|----------|---------|
+| Inv-1 (Single source of truth) | Plan file is canonical; triggers are derived from it | `store_round_trips_plan_under_injected_base_dir`, `stale_temp_file_does_not_replace_real_plan` |
+| Inv-2 (Agent-safe CLI) | Non-interactive; `--json` stable schema; exit codes | `set_and_show_json_round_trip_with_fake_context`, `error_exit_codes_match_the_cli_contract` |
+| Inv-3 (Idempotence) | `apply` converges; upserts don't duplicate | `apply_dry_run_reports_diff_and_real_apply_is_idempotent`, `apply_is_idempotent_for_future_blocks` |
+| Inv-4 (Stable identity) | Day-unique, edit-stable id | `validation_reports_duplicate_ids`, `set_plan_rejects_terminal_id_reuse_without_override` |
+| Inv-5 (Unambiguous time) | Absolute instant via date + frozen tz | `resolves_spring_forward_gap_with_compatible_strategy`, `resolves_fall_back_fold_with_compatible_strategy` |
+| Inv-6 (Fresh-fire only) | Trigger acts iff rev matches live plan | `stale_fire_noops_without_recording_a_notification` |
+| Inv-7 (Immutable history) | Terminal blocks and fire.log never mutated | `set_plan_retains_terminal_blocks_omitted_from_incoming_plan`, `mutation_commands_update_only_non_terminal_blocks` |
+| Inv-8 (One execution path) | Automation runs only allowlisted commands | `test_automation_refused_when_disabled`, `test_automation_refused_when_not_absolute`, `test_automation_refused_when_not_allowlisted`, `test_automation_refused_when_bad_permissions` |
+| Inv-9 (Atomic writes) | temp-then-rename under lockfile | `stale_temp_file_does_not_replace_real_plan`, `second_lock_attempt_fails_cleanly` |
+| Inv-10 (Self-contained namespace) | Only `ccplan-*` / `io.ccplan.*` / `\ccplan\` touched | `systemd_calendar_renders_utc` (unit name prefix), `windows_boundary_and_task_name`, `launchd_label_and_calendar_interval` |
+| Inv-11 (Array query semantics) | `now`/`next`/`agenda` return JSON arrays | `human_read_outputs_cover_empty_and_non_empty_arrays` |
+| Inv-12 (Explicit destruction) | Irreversible ops require explicit flags | `clear_requires_yes_and_purge_removes_without_archive` |
+| Inv-13 (Lifecycle closure) | No block remains active past end | `fire_end_active_closes_done_when_auto_done_is_enabled`, `fire_end_active_closes_expired_when_auto_done_is_disabled`, `reconcile_overdue_marks_pending_missed_and_active_expired` |
+| Inv-14 (At-most-once fire) | Per (date,id,event,rev,scheduled_at) at most once | `fire_start_records_ledger_notifies_updates_status_and_deduplicates`, `fired_ledger_check_and_set_is_idempotent`, `fired_ledger_check_and_set_is_durable` |
+| Inv-15 (Schedule-only rev) | Rev depends only on trigger-affecting fields | `schedule_rev_excludes_lifecycle_and_content_fields`, `lifecycle_and_content_edits_do_not_change_schedule_revs` |
+| Inv-16 (No double-notify) | ≤1 notification per block per fire instant | `apply_omits_notify_trigger_at_zero_lead_but_keeps_it_for_positive_lead` |
+| Inv-17 (Transactional mutation) | Load→mutate→write under single lock | `store_update_serializes_concurrent_additive_writes_without_loss` |
+| Inv-18 (Side-effect-free reads) | Query commands never persist state | `read_queries_reconcile_in_memory_without_persisting_and_apply_persists` |
+
+### F. Backlog items raised/closed
+- No new items raised.
+- Deferred: B-003, B-004, B-009, B-010, B-013, B-015, B-016 (all with written rationale in backlog.md).
+- All MAJOR Reviews.md findings (B-006/007/008) were already resolved before Stage 9.
+- All B-006…B-016 items are now either resolved or explicitly deferred. Gate: PASS.
+
+### G. Acceptance-gate confirmation
+- [x] DoD gate passes locally: fmt clean, clippy clean, 137 passed / 0 failed / 1 ignored (sanctioned)
+      / 0 filtered out; 100% line coverage; cargo deny clean; release build succeeds.
+- [x] CI: last known push (Stage 8, `73677ee`) was green on Ubuntu/macOS/Windows.
+- [x] Both anti-gaming guards pass.
+- [x] 100% line coverage; sanctioned exclusions only (verified list above).
+- [x] Every Inv-1…Inv-18 has a named test (table above).
+- [x] All Reviews.md MAJOR findings resolved; backlog B-006…B-016 closed or deferred with rationale.
+- [x] Dogfood evidence recorded above (Linux, isolated store, set/apply/done/skip/clear verified).
+- [x] CHANGELOG.md finalized for v1.0.0; version = "1.0.0" in Cargo.toml.
+- [ ] `v1.0.0` tagged + release workflow artifacts — pending user confirmation of PR/merge/tag.

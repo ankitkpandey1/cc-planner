@@ -222,6 +222,20 @@ Tooling (installed in CI, not deps): `cargo-llvm-cov`, `cargo-deny`, `cargo-dist
 > Format: `### YYYY-MM-DD — <stage/topic>` then bullets. Record decisions, surprises, dead-ends,
 > and anything a future session must know. This is the anti-amnesia log.
 
+### 2026-06-09 — Stage 9 production readiness
+- Stage 9 precondition: re-read all memory files; re-ran the full DoD gate before any changes.
+  137 passed / 0 failed / 1 ignored / 0 filtered out; 100% line coverage; both anti-gaming guards pass;
+  deny clean; release build succeeds.
+- Coverage report shows "96.88% Regions" alongside "100% Lines" — these are different metrics. The
+  gate is `--fail-under-lines 100` which checks Lines (100%), not Regions (branch coverage). Exit 0 confirmed.
+- `done`/`skip` have no `--date` flag (B-013) — confirmed in dogfood; these hardcode today. Deferred P3.
+- Invariant-to-test mapping complete: all 18 invariants have at least one named test in the test suite.
+- Backlog cleanup: B-003/B-004/B-009/B-010/B-013/B-015/B-016 all explicitly deferred with rationale.
+  No P1 open items remain.
+- CHANGELOG finalized: moved release-engineering items from [Unreleased] into [1.0.0] entry; the final
+  [1.0.0] entry now covers all features comprehensively. [Unreleased] is empty and ready for release-plz.
+- Ship action (PR dev→main, tag v1.0.0) must be confirmed by user — it's shared-state and irreversible.
+
 ### 2026-06-08 — Stage 8 OSS hygiene, agent skill, and release engineering
 - Stage 8 precondition: re-read goal prompt, notes, backlog, checklist, Reviews, DESIGN, and
   CONVENTIONS; re-ran the Stage 7/global gate before implementation. No open P1 blockers.

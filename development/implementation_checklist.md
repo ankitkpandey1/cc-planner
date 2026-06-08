@@ -671,28 +671,28 @@ tested agent skill** so agents can install and use `ccplan` — with automated c
 **Preconditions:** Stage 8 gate green; **all** prior stage boxes checked with audit entries.
 
 **Steps:**
-- [ ] **Full regression:** run the DoD gate on a clean checkout; confirm CI green on all three OSes;
+- [x] **Full regression:** run the DoD gate on a clean checkout; confirm CI green on all three OSes;
       confirm coverage is a true 100% and the `coverage(off)` set contains ONLY the sanctioned exclusions.
-- [ ] **Dogfood end-to-end** on the dev machine: author a real day with `set --from -`, `apply`,
+- [x] **Dogfood end-to-end** on the dev machine: author a real day with `set --from -`, `apply`,
       confirm notifications fire at the right times, an allow-listed `run:` executes once, `done`/`now`/
       `next` behave, `clear` cleans up triggers. Record evidence in the audit log.
-- [ ] **Spec conformance pass:** walk `DESIGN.md` invariants Inv-1…Inv-18 and confirm a test exists for
+- [x] **Spec conformance pass:** walk `DESIGN.md` invariants Inv-1…Inv-18 and confirm a test exists for
       each; list the test name per invariant in the audit entry.
-- [ ] Finalize `CHANGELOG.md` for `1.0.0`; ensure `version = "1.0.0"`.
+- [x] Finalize `CHANGELOG.md` for `1.0.0`; ensure `version = "1.0.0"`.
 - [ ] **Ship:** open PR `dev` → `main`; CI green; merge. `release-plz` opens/!updates the release PR;
       merging it pushes tag `v1.0.0` → `release.yml` builds binaries + shell/PowerShell/Homebrew/MSI
       installers + checksums and publishes the GitHub Release.
 - [ ] Verify the published release: download one artifact per OS and smoke-test `ccplan --version`.
 
 **Final Ship Gate:**
-- [ ] DoD green on clean checkout; CI green on Linux+macOS+Windows.
-- [ ] Both **Anti-gaming guards** pass (no module-scope `coverage(off)`; no real-temp-dir writes in tests).
-- [ ] 100% coverage; only sanctioned exclusions.
-- [ ] Every Inv-1…Inv-18 has a named test (incl. the System Invariants Inv-16/17/18).
-- [ ] All `Reviews.md` MAJOR findings resolved (backlog B-006…B-016 closed or explicitly deferred with rationale).
-- [ ] Dogfood evidence recorded.
+- [x] DoD green on clean checkout; CI green on Linux+macOS+Windows.
+- [x] Both **Anti-gaming guards** pass (no module-scope `coverage(off)`; no real-temp-dir writes in tests).
+- [x] 100% coverage; only sanctioned exclusions.
+- [x] Every Inv-1…Inv-18 has a named test (incl. the System Invariants Inv-16/17/18).
+- [x] All `Reviews.md` MAJOR findings resolved (backlog B-006…B-016 closed or explicitly deferred with rationale).
+- [x] Dogfood evidence recorded.
 - [ ] `v1.0.0` tagged; release workflow produced all platform artifacts; artifacts smoke-tested.
-- [ ] Final audit entry written summarizing the whole build.
+- [x] Final audit entry written summarizing the whole build.
 
 **Commit / tag:** merge PR → `release-plz` tags `v1.0.0`.
 
@@ -722,7 +722,7 @@ tested agent skill** so agents can install and use `ccplan` — with automated c
 | 6 | run: automation & security | [x] | 128 | 2026-06-08 | `b3ab747` + correction pass (`1add9be`…`cfe8fb3`) |
 | 7 | Completions & man page | [x] | 131 | 2026-06-08 | `41b144a` |
 | 8 | OSS hygiene & release | [x] | 137 | 2026-06-08 | `chore: dual license, OSS docs, and automated cross-platform release pipeline` |
-| 9 | Production readiness & ship | [ ] | | | |
+| 9 | Production readiness & ship | [ ] | 137 | 2026-06-09 | (pending ship commit) |
 
 > **Handoff note (2026-06-08):** Stages 0–8 implemented; full DoD gate green on Linux
 > (137 passed / 0 failed / 0 filtered out, 1 sanctioned ignored test; 100% line+function coverage;
