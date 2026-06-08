@@ -224,6 +224,10 @@ Tooling (installed in CI, not deps): `cargo-llvm-cov`, `cargo-deny`, `cargo-dist
 - Coverage warning gotcha: with Stage 0's only `coverage(off)` use living in test-only code, nightly
   reports `feature(coverage_attribute)` as unused unless `unused_features` is allowed under the same
   `coverage_nightly` cfg. This is not a business-logic exclusion.
+- CI gotchas from the first dev push: the repo-level `rust-toolchain.toml` makes bare
+  `cargo llvm-cov` run under pinned stable even after `dtolnay/rust-toolchain@nightly`; use
+  `cargo +nightly llvm-cov` in CI. Windows checkout converted Rust files to CRLF, which violated
+  `newline_style = "Unix"`; `.gitattributes` now forces LF.
 
 ### 2026-06-08 — review round 4 fixes + agent skill (D20)
 - Final-v1 → version/tag/artifacts are **v1.0.0** (was v0.1.0) everywhere.

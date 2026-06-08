@@ -56,7 +56,7 @@ jobs:
         env:
           RUSTFLAGS: --cfg coverage_nightly
         run: >
-          cargo llvm-cov --all-features --workspace --fail-under-lines 100
+          cargo +nightly llvm-cov --all-features --workspace --fail-under-lines 100
           --codecov --output-path codecov.json
       - name: Upload coverage
         uses: codecov/codecov-action@v5
