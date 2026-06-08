@@ -459,3 +459,160 @@ Codecov action`; `30f9a70` `ci: keep coverage gate independent of codecov`   · 
 
 ### G. Acceptance-gate confirmation
 - [x] DoD green; `time` + `lifecycle` at 100% (minus `SystemClock`). Audit + notes updated.
+
+## Stage 3 — Storage layer (filesystem, injected root) — 2026-06-08
+
+**Commit(s):** `50ef2c1` `feat: atomic locked TOML store with archive, fired-ledger, and trigger bookkeeping`   ·   `4afacd2` `fix: classify Windows lock contention as store locked`   ·   **Branch:** `dev`
+
+### A. Recon summary
+- Re-read `development/notes.md`, `development/backlog.md`, `development/implementation_checklist.md`,
+  DESIGN §6.2/§6.3/§6.4, and Inv-7/Inv-9/Inv-14.
+- Re-ran the Stage 2/global gate before coding; fmt, clippy, tests, coverage, `cargo-deny`, release
+  build, MSRV, and duplicate scan all passed at the Stage 2 tip.
+- Confirmed `directories 6.0.0`, `fs2 0.4.3`, and `assert_fs 1.1.4` are current enough for the stage.
+  B-001 was resolved during dependency-gate review.
+
+### B. What was built
+- Added `src/store.rs` and exported it from `src/lib.rs`.
+- Implemented injected-root storage paths plus real `ProjectDirs` paths for data/config/state:
+  `plans/YYYY-MM-DD.toml`, `archive/YYYY-MM-DD.toml`, `log/fire.log`, `triggers.json`, and
+  `fired.json`.
+- Implemented lock-guarded plan load/set/archive/purge. Plan writes are temp-file → `sync_all` →
+  rename under an `fs2` lock.
+- Implemented `HistoryPolicy::{Preserve,Override}`. Preserve keeps terminal blocks, rejects terminal id
+  reuse/alteration with exit 6, and rejects timezone changes that would reinterpret existing terminal
+  history.
+- Implemented durable fired-ledger check-and-set keyed `(date, block_id, event, rev, scheduled_at)`.
+- Implemented trigger descriptor record/list/remove with event/rev/scheduled timestamp.
+- Added serde support for `Event` and `ScheduleRev` so ledger/trigger JSON stays typed.
+- Added 24 store integration tests, one store property test, and one internal atomic-write unit test.
+
+### C. Self-review findings & fixes
+- `directories 5.0.1` was tested as the design-pinned option, but it still pulled `option-ext` and also
+  introduced duplicate older transitive versions (`thiserror`, `windows-sys`) under the all-target
+  `cargo-deny` graph. Kept `directories 6.0.0` and explicitly allowed OSI-approved `MPL-2.0` in
+  `deny.toml` for `option-ext`; no advisory or duplicate-version exceptions were added.
+- The first terminal-history merge would have allowed retained terminal blocks to be reinterpreted if
+  the incoming plan changed timezone. Fixed by rejecting timezone changes when existing terminal blocks
+  are present unless `HistoryPolicy::Override` is used.
+- Coverage exposed a private `ensure_parent` no-parent closure artifact. Fixed the implementation to
+  treat bare relative filenames as `.` and covered that with the internal atomic-write unit test.
+- CI run `27132180229` failed only on Windows: `second_lock_attempt_fails_cleanly` received a non-`Locked`
+  error. Root cause was platform-specific `fs2` lock contention reporting (`PermissionDenied` /
+  `ERROR_SHARING_VIOLATION` / `ERROR_LOCK_VIOLATION`) rather than only `WouldBlock`. Fixed in
+  `4afacd2` by classifying those post-open lock errors as `StoreError::Locked`.
+
+### D. Evidence
+- `cargo fmt --all -- --check`:
+
+  ```text
+  <no output; exit 0>
+  ```
+
+- `cargo clippy --all-targets --all-features -- -D warnings`:
+
+  ```text
+  Checking ccplan v1.0.0 (/home/euler/test/cc-planner)
+  Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.64s
+  ```
+
+- `cargo test --all-features --workspace`:
+
+  ```text
+  running 3 tests
+  test result: ok. 3 passed; 0 failed
+
+  running 1 test
+  test result: ok. 1 passed; 0 failed
+
+  running 12 tests
+  test result: ok. 12 passed; 0 failed
+
+  running 2 tests
+  test result: ok. 2 passed; 0 failed
+
+  running 13 tests
+  test result: ok. 13 passed; 0 failed
+
+  running 3 tests
+  test result: ok. 3 passed; 0 failed
+
+  running 24 tests
+  test result: ok. 24 passed; 0 failed
+
+  running 1 test
+  test result: ok. 1 passed; 0 failed
+
+  running 4 tests
+  test result: ok. 4 passed; 0 failed
+
+  Doc-tests ccplan
+  test result: ok. 0 passed; 0 failed
+  ```
+
+- `RUSTFLAGS="--cfg coverage_nightly" cargo +nightly llvm-cov --all-features --workspace
+  --fail-under-lines 100`:
+
+  ```text
+  lifecycle.rs  81 lines, 0 missed lines, 100.00% line cover
+  model.rs     446 lines, 0 missed lines, 100.00% line cover
+  store.rs     244 lines, 0 missed lines, 100.00% line cover
+  time.rs       27 lines, 0 missed lines, 100.00% line cover
+  TOTAL        805 lines, 0 missed lines, 100.00% line cover
+  ```
+
+- `cargo deny check`:
+
+  ```text
+  advisories ok, bans ok, licenses ok, sources ok
+  ```
+
+- `cargo build --release`:
+
+  ```text
+  Finished `release` profile [optimized] target(s) in 2.28s
+  ```
+
+- `cargo +1.85.0 check --all-features --workspace`:
+
+  ```text
+  Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.32s
+  ```
+
+- `cargo tree --duplicates`:
+
+  ```text
+  warning: nothing to print.
+  ```
+
+- CI: https://github.com/ankitkpandey1/cc-planner/actions/runs/27132416238 passed.
+
+  ```text
+  ✓ test (ubuntu-latest) in 38s
+  ✓ test (macos-latest) in 49s
+  ✓ test (windows-latest) in 2m32s
+  ✓ MSRV in 27s
+  ✓ coverage in 44s
+  ✓ cargo-deny in 42s
+  ```
+
+- Coverage exclusions added this stage:
+  - `Store::for_user` is marked `coverage(off)` because it is the real platform-directory boundary.
+  - `lock_file` / `is_lock_contention` and the small error-mapping/serialization helpers are marked
+    `coverage(off)` because their failure modes depend on OS/filesystem APIs or impossible
+    `Vec<u8>` JSON serialization errors. Public behavior is covered through `Store` APIs.
+
+### E. Reflection & learnings
+- The store is the right place to encode immutable-history policy, including timezone preservation for
+  terminal blocks; otherwise later CLI code would have to remember subtle invariants.
+- `cargo-deny` all-target checks are a useful dependency-design tool: `directories 5` looked more aligned
+  with the original pin but produced a worse graph than `directories 6`.
+- Cross-platform lock tests must account for OS-specific error kinds even when the high-level behavior
+  is identical.
+
+### F. Backlog items raised/closed
+- Raised: none.
+- Closed: B-001.
+
+### G. Acceptance-gate confirmation
+- [x] DoD green; `store` at 100%. Audit + notes updated.

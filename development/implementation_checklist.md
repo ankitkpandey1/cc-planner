@@ -408,23 +408,23 @@ triggers bookkeeping, all under an injectable base directory so tests use a temp
 **Preconditions:** Stage 2 gate green.
 
 **Steps (TDD each):**
-- [ ] Add `directories`, `fs2`, `blake3`. `src/store.rs`: a `Store` that takes a base dir (real =
+- [x] Add `directories`, `fs2`, `blake3`. `src/store.rs`: a `Store` that takes a base dir (real =
       `directories` data/config/state; test = `assert_fs::TempDir`). Paths per `DESIGN.md` §6.2 (TOML).
-- [ ] Atomic write: serialize → write temp file → `fsync` → rename; guard with an `fs2` lockfile
+- [x] Atomic write: serialize → write temp file → `fsync` → rename; guard with an `fs2` lockfile
       (Inv-9). Concurrent-writer test: second lock attempt fails clean.
-- [ ] `load_plan(date)` validates on read and **rejects invalid plans** (covers hand edits, §11/§12).
-- [ ] `set` merge semantics (Inv-7/D9): incoming non-terminal blocks replace; terminal blocks always
+- [x] `load_plan(date)` validates on read and **rejects invalid plans** (covers hand edits, §11/§12).
+- [x] `set` merge semantics (Inv-7/D9): incoming non-terminal blocks replace; terminal blocks always
       retained even if omitted; reusing/altering a terminal id without override → error (exit 6).
-- [ ] `archive(date)` (move plan to `archive/`) and `purge(date)`.
-- [ ] **Fired-event ledger** (`fired.json`): atomic check-and-set keyed `(date,id,event,rev,
+- [x] `archive(date)` (move plan to `archive/`) and `purge(date)`.
+- [x] **Fired-event ledger** (`fired.json`): atomic check-and-set keyed `(date,id,event,rev,
       scheduled_at)` returning "already fired?" — under the same lock (D7, Inv-14, §6.4).
-- [ ] `triggers.json`: record/list/remove owned trigger descriptors + the rev each was built from.
-- [ ] Unit/integration tests with `assert_fs`: round-trip; atomic-write survives simulated crash
+- [x] `triggers.json`: record/list/remove owned trigger descriptors + the rev each was built from.
+- [x] Unit/integration tests with `assert_fs`: round-trip; atomic-write survives simulated crash
       (temp left, real intact); ledger dedup; set-merge retains terminal blocks; reject invalid file.
-- [ ] `proptest`: ledger check-and-set is idempotent (second set of same key returns "already").
+- [x] `proptest`: ledger check-and-set is idempotent (second set of same key returns "already").
 
 **Acceptance Gate:**
-- [ ] DoD green; `store` at 100%. Audit + notes updated.
+- [x] DoD green; `store` at 100%. Audit + notes updated.
 
 **Commit:** `feat: atomic locked TOML store with archive, fired-ledger, and trigger bookkeeping`
 

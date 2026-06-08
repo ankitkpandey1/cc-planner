@@ -64,7 +64,7 @@ toml          = "1"
 serde         = { version = "1", features = ["derive"] }
 serde_json    = "1"
 jiff          = { version = "0.2", features = ["serde"] }
-directories   = "5"
+directories   = "6"
 blake3        = "1"
 notify-rust   = "4"
 fs2           = "0.4"
@@ -194,7 +194,9 @@ Tooling (installed in CI, not deps): `cargo-llvm-cov`, `cargo-deny`, `cargo-dist
 - Decide how to integration-test the real schedulers in CI (likely `#[ignore]`d tests run per-OS, or a
   `--features integration` gate). Real timer firing in CI is flaky — keep it minimal and explicit.
 - Decide whether `ccplan fire` on macOS does its own bootout, or a tiny `fire-once` wrapper does.
-- `directories` v5 vs newer — confirm latest at implementation time.
+- `directories` v5 vs newer — resolved in Stage 3: use `directories = "6"` so the storage layer stays
+  current; `cargo-deny` explicitly allows the transitive OSI-approved `MPL-2.0` license from
+  `option-ext`, with no advisory or duplicate-version exceptions.
 
 ---
 
@@ -202,6 +204,32 @@ Tooling (installed in CI, not deps): `cargo-llvm-cov`, `cargo-deny`, `cargo-dist
 
 > Format: `### YYYY-MM-DD — <stage/topic>` then bullets. Record decisions, surprises, dead-ends,
 > and anything a future session must know. This is the anti-amnesia log.
+
+### 2026-06-08 — Stage 3 atomic store + fired ledger + triggers
+- Stage 3 precondition: re-read notes/backlog/checklist plus DESIGN §6.2/§6.3/§6.4 and Inv-7/Inv-9/
+  Inv-14; re-ran the Stage 2/global gate before implementation.
+- Storage is now centralized in `src/store.rs`. `Store::new(&Path)` maps injected test roots to
+  `data/ccplan`, `config/ccplan`, and `state/ccplan`; `Store::for_user()` uses `directories::ProjectDirs`
+  for the real platform data/config/state dirs.
+- B-001 resolved: keep the implementation current with `directories = "6"` rather than downgrading to
+  the design's older pinned major. Trying `directories 5.0.1` still pulled `option-ext` and also added
+  duplicate older Windows/`thiserror` transitive versions. `directories 6.0.0` keeps the duplicate graph
+  clean. `deny.toml` now explicitly allows `MPL-2.0` for the OSI-approved transitive `option-ext` crate.
+- Plan writes are locked with `fs2` and use temp-file → `sync_all` → rename. Parent-directory fsync is
+  intentionally not attempted with `std` because it is not portable on Windows; the file data is fsynced
+  before the atomic rename.
+- `set_plan` preserves terminal history by id and also rejects timezone changes when existing terminal
+  blocks would be reinterpreted under a new plan timezone. `HistoryPolicy::Override` is the explicit
+  escape hatch.
+- The fired ledger is durable JSON keyed by `(date, block_id, event, rev, scheduled_at)`. Trigger records
+  are durable JSON descriptors with backend id + date/id/event/rev/scheduled_at. `fire_log_path()` is
+  exposed under `data/ccplan/log/fire.log` for the later fire stage.
+- Coverage gotchas: low-level OS error mapping helpers are `coverage(off)` because write/sync/rename and
+  lock API failures are platform-controlled. A small internal store unit test exercises `atomic_write`
+  in the library test binary so source-coverage line accounting stays at 100%.
+- CI gotcha: Windows reports `fs2::try_lock_exclusive` contention as `PermissionDenied` / raw OS lock
+  errors (`ERROR_SHARING_VIOLATION`/`ERROR_LOCK_VIOLATION`), not just `WouldBlock`. `StoreError::Locked`
+  now classifies those post-open lock failures as lock contention.
 
 ### 2026-06-08 — Stage 2 DST time + pure lifecycle
 - Stage 2 precondition: re-read `notes.md`, `backlog.md`, `implementation_checklist.md`, and DESIGN
@@ -259,8 +287,9 @@ Tooling (installed in CI, not deps): `cargo-llvm-cov`, `cargo-deny`, `cargo-dist
   - `cargo-llvm-cov` sets `cfg(coverage)` and `cfg(coverage_nightly)` itself when run on nightly,
     but the project keeps the explicit `RUSTFLAGS="--cfg coverage_nightly"` command required by the
     checklist/docs.
-  - `directories` latest docs show 6.0.0 and `ProjectDirs::{data,config,state}_dir` semantics; the
-    design still pins major 5, so B-001 tracks the decision for the storage stage.
+  - `directories` latest docs show 6.0.0 and `ProjectDirs::{data,config,state}_dir` semantics. This was
+    later resolved in Stage 3 by using `directories = "6"` and allowing the transitive OSI-approved
+    `MPL-2.0` license from `option-ext`.
 - `cargo-deny` 0.19 uses `unmaintained = "all"` rather than a lint level; the generated template was
   used first, then tightened to deny unknown sources, wildcard dependencies, duplicate versions,
   yanked crates, and all unmaintained advisories.

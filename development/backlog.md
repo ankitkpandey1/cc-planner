@@ -21,10 +21,10 @@
 
 | ID | Found in stage | Priority | Description / action | Target |
 |----|:--------------:|:--------:|----------------------|--------|
-| B-001 | 0 | P2 | Decide whether to keep `directories = "5"` per the pinned design or update to `directories = "6"` before introducing storage paths; record the rationale in notes. | Stage 3 |
+| _(none)_ | | | | |
 
 ## Resolved
 
 | ID | Description | Closed by |
 |----|-------------|-----------|
-| _(none yet)_ | | |
+| B-001 | Decided `directories = "5"` vs `directories = "6"` for storage. Stage 3 uses `directories = "6"`; `directories 5.0.1` still pulled `option-ext` and introduced duplicate older transitive versions, while `6.0.0` keeps the duplicate graph clean. `deny.toml` explicitly allows OSI-approved `MPL-2.0` for `option-ext`. | Stage 3 implementation commits `50ef2c1` + `4afacd2` |
