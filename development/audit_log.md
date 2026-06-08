@@ -309,3 +309,145 @@ Codecov action`; `30f9a70` `ci: keep coverage gate independent of codecov`   · 
 
 ### G. Acceptance-gate confirmation
 - [x] DoD green; `model` module at 100% coverage. Audit + notes updated.
+
+## Stage 2 — Time resolution, Clock trait & lifecycle logic — 2026-06-08
+
+**Commit(s):** `393bacb` `feat: DST-correct time resolution, Clock trait, and lifecycle decision logic`   ·   **Branch:** `dev`
+
+### A. Recon summary
+- Re-read `development/notes.md`, `development/backlog.md`, `development/implementation_checklist.md`,
+  DESIGN §7/§12, and the Stage 1 model code.
+- Re-ran the Stage 1/global gate before coding: fmt, clippy, tests, coverage, `cargo-deny`, release
+  build, MSRV check, and duplicate-dependency scan all passed at the Stage 1 tip.
+- Confirmed the local `jiff` 0.2 API: `DateTime::to_zoned(TimeZone)` uses the Compatible ambiguity
+  strategy, `Zoned::now()` is the real clock source, and `Timestamp::checked_add` accepts
+  `SignedDuration`.
+- Used `LifecyclePolicy` rather than a bare boolean so the end event can model both DESIGN §7 outcomes
+  (`done` with auto-done, `expired` otherwise) without an unreadable boolean parameter.
+
+### B. What was built
+- Added `src/time.rs` with DST-correct wall-clock resolution, a `Clock` trait, `SystemClock`, and
+  `FixedClock` behind the `test-fakes` feature.
+- Added small model accessors needed by time/lifecycle code: `PlanDate::as_jiff_date`,
+  `TimeZoneName::to_time_zone`, `ClockTime::{hour,minute}`, and `Status::is_terminal`.
+- Added `src/lifecycle.rs` with pure `decide_fire`, `Event`, `FireDecision`, `LifecyclePolicy`,
+  `EndBehavior`, `StatusUpdate`, and `reconcile_overdue`.
+- Added tests for normal/gap/fold time resolution, fixed clock injection, every lifecycle table cell,
+  grace boundary behavior, overdue reconcile behavior, terminal immutability, and decision purity.
+
+### C. Self-review findings & fixes
+- Initial lifecycle signature could not encode both `done` and `expired` end outcomes from DESIGN §7.
+  Fixed with `LifecyclePolicy { grace, end_behavior }`.
+- The first reconcile boundary fixture used the wrong UTC instant for New York in June. Fixed the test
+  to use EDT (`10:30` local = `14:30Z`).
+- Clippy flagged `ClockTime` component casts. Kept the simple API and documented the local invariant
+  (`minutes_since_midnight < 1440`) on the two narrow casts.
+- Coverage showed three uncovered lines: an unreachable terminal arm in `decide_start`, a multiline
+  duration expression artifact, and a private invalid-timezone branch. Refactored the first two and
+  added an internal invariant test for the third.
+
+### D. Evidence
+- `cargo fmt --all -- --check`:
+
+  ```text
+  <no output; exit 0>
+  ```
+
+- `cargo clippy --all-targets --all-features -- -D warnings`:
+
+  ```text
+  Checking ccplan v1.0.0 (/home/euler/test/cc-planner)
+  Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.63s
+  ```
+
+- `cargo test --all-features --workspace`:
+
+  ```text
+  running 2 tests
+  test result: ok. 2 passed; 0 failed
+
+  running 1 test
+  test result: ok. 1 passed; 0 failed
+
+  running 12 tests
+  test result: ok. 12 passed; 0 failed
+
+  running 2 tests
+  test result: ok. 2 passed; 0 failed
+
+  running 13 tests
+  test result: ok. 13 passed; 0 failed
+
+  running 3 tests
+  test result: ok. 3 passed; 0 failed
+
+  running 4 tests
+  test result: ok. 4 passed; 0 failed
+
+  Doc-tests ccplan
+  test result: ok. 0 passed; 0 failed
+  ```
+
+- `RUSTFLAGS="--cfg coverage_nightly" cargo +nightly llvm-cov --all-features --workspace
+  --fail-under-lines 100`:
+
+  ```text
+  lifecycle.rs  81 lines, 0 missed lines, 100.00% line cover
+  model.rs     446 lines, 0 missed lines, 100.00% line cover
+  time.rs       27 lines, 0 missed lines, 100.00% line cover
+  TOTAL        561 lines, 0 missed lines, 100.00% line cover
+  ```
+
+- `cargo deny check`:
+
+  ```text
+  advisories ok, bans ok, licenses ok, sources ok
+  ```
+
+- `cargo build --release`:
+
+  ```text
+  Finished `release` profile [optimized] target(s) in 2.25s
+  ```
+
+- `cargo +1.85.0 check --all-features --workspace`:
+
+  ```text
+  Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.60s
+  ```
+
+- `cargo tree --duplicates`:
+
+  ```text
+  warning: nothing to print.
+  ```
+
+- CI: https://github.com/ankitkpandey1/cc-planner/actions/runs/27130404333 passed.
+
+  ```text
+  ✓ test (ubuntu-latest) in 44s
+  ✓ test (macos-latest) in 38s
+  ✓ test (windows-latest) in 1m50s
+  ✓ MSRV in 28s
+  ✓ coverage in 42s
+  ✓ cargo-deny in 44s
+  ```
+
+- Coverage exclusions added this stage:
+  - `src/time.rs:SystemClock::now` is marked `#[cfg_attr(coverage_nightly, coverage(off))]` because it
+    is the real-time boundary (`Zoned::now()`); tests use `FixedClock`.
+
+### E. Reflection & learnings
+- `DateTime::to_zoned` is the right level for Stage 2: it gives DST Compatible behavior without
+  custom ambiguity handling.
+- Pure lifecycle logic stays easy to test when it returns decisions/status updates only; store mutation,
+  notifications, and automation remain later-stage responsibilities.
+- Coverage can expose private invariant branches. Covering them with internal tests is preferable to
+  weakening the public type boundary.
+
+### F. Backlog items raised/closed
+- Raised: none.
+- Closed: none.
+
+### G. Acceptance-gate confirmation
+- [x] DoD green; `time` + `lifecycle` at 100% (minus `SystemClock`). Audit + notes updated.

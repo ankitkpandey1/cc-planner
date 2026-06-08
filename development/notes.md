@@ -203,6 +203,26 @@ Tooling (installed in CI, not deps): `cargo-llvm-cov`, `cargo-deny`, `cargo-dist
 > Format: `### YYYY-MM-DD — <stage/topic>` then bullets. Record decisions, surprises, dead-ends,
 > and anything a future session must know. This is the anti-amnesia log.
 
+### 2026-06-08 — Stage 2 DST time + pure lifecycle
+- Stage 2 precondition: re-read `notes.md`, `backlog.md`, `implementation_checklist.md`, and DESIGN
+  §7/§12 before coding; re-ran the Stage 1/global gate and confirmed the branch was clean.
+- `jiff::civil::DateTime::to_zoned(TimeZone)` applies the Compatible strategy directly: spring-forward
+  gaps move to the next real local time, and fall-back folds choose the earlier occurrence. Stage 2
+  documents that choice in `src/time.rs` and tests normal, gap, and fold cases.
+- `Clock` is now injectable in `src/time.rs`: `SystemClock` is the only direct `Zoned::now()` caller
+  and is excluded from coverage as real time I/O; `FixedClock` is gated behind `test-fakes`.
+- Lifecycle decisions are pure: `decide_fire` depends only on `Block`, `Event`, scheduled timestamp,
+  current timestamp, and `LifecyclePolicy`. The policy carries both grace and the end behavior because
+  DESIGN §7 allows `fire(end)` to close as either `done` or `expired`.
+- Grace is interpreted exactly as DESIGN §7 states: `now > target + grace` is overdue; equality at the
+  boundary is still on-time. Tests cover `+60s` vs `+61s`.
+- `reconcile_overdue` emits deterministic sorted status updates and follows the sleep/off path:
+  overdue pending blocks become `missed`; overdue active blocks become `expired`; terminal history stays
+  immutable. Duration-based ends are resolved by adding invariant seconds to the resolved start instant.
+- Coverage gotcha: private invariant error paths can still count against 100% line coverage. An internal
+  model unit test covers the impossible-invalid `TimeZoneName` branch without exposing an invalid public
+  constructor.
+
 ### 2026-06-08 — Stage 1 domain model + schedule rev
 - Stage 1 precondition: re-read `notes.md`, `backlog.md`, `implementation_checklist.md`, `DESIGN.md`
   §6.3/§10/§12, and `CONVENTIONS.md`; re-ran the Stage 0/global gate and confirmed CI run

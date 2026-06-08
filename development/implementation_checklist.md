@@ -348,22 +348,22 @@ injectable `Clock`, and implement the lifecycle/fire **decision** logic as pure 
 **Preconditions:** Stage 1 gate green.
 
 **Steps (TDD each):**
-- [ ] Add `jiff` (notes §2). `src/time.rs`: `resolve(date, tz, wallclock) -> jiff::Timestamp` using
+- [x] Add `jiff` (notes §2). `src/time.rs`: `resolve(date, tz, wallclock) -> jiff::Timestamp` using
       jiff's ambiguous-time handling (Compatible strategy; document the choice). Tests cover a normal
       time, a spring-forward gap, and a fall-back fold for a real DST zone (e.g. `America/New_York`).
-- [ ] `Clock` trait (`fn now(&self) -> jiff::Zoned`). `SystemClock` (real, `#[coverage(off)]`) and
+- [x] `Clock` trait (`fn now(&self) -> jiff::Zoned`). `SystemClock` (real, `#[coverage(off)]`) and
       `FixedClock` (test, in `#[cfg(any(test, feature="test-fakes"))]`).
-- [ ] `src/lifecycle.rs`: pure `decide_fire(block, event, scheduled_at, now, grace) -> FireDecision`
+- [x] `src/lifecycle.rs`: pure `decide_fire(block, event, scheduled_at, now, grace) -> FireDecision`
       implementing the §7 event table exactly: `notify` overdue → `NoOp`; on-time → `Notify`; `start`
       on-time → `Activate{notify, maybe_run}`, overdue+pending → `MarkMissed`; `end` on-time/overdue
       while active → `Close(done|expired)`, already-terminal → `NoOp`. And `reconcile_overdue(plan,
       now)` → status updates (the "next apply/query reconcile" path).
-- [ ] Unit tests for every cell of the §7 table + grace boundary (just inside / just outside).
-- [ ] `proptest`: a block never transitions out of a terminal state; `decide_fire` is a pure function
+- [x] Unit tests for every cell of the §7 table + grace boundary (just inside / just outside).
+- [x] `proptest`: a block never transitions out of a terminal state; `decide_fire` is a pure function
       of its inputs (no hidden state).
 
 **Acceptance Gate:**
-- [ ] DoD green; `time` + `lifecycle` at 100% (minus `SystemClock`). Audit + notes updated.
+- [x] DoD green; `time` + `lifecycle` at 100% (minus `SystemClock`). Audit + notes updated.
 
 **Commit:** `feat: DST-correct time resolution, Clock trait, and lifecycle decision logic`
 
