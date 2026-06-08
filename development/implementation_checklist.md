@@ -582,21 +582,21 @@ formatting) stay covered and unit-tested (see Coverage honesty rule + Anti-gamin
 **Preconditions:** Stage 5 gate green.
 
 **Steps (TDD each):**
-- [ ] `config.toml` model (`directories` config dir): `automation.enabled` (default false),
+- [x] `config.toml` model (`directories` config dir): `automation.enabled` (default false),
       `allowed_executables` (absolute paths), `timeout` (default `5m`), `notify.default_lead`, `grace`.
-- [ ] In `fire`: if block has `run`, enforce — automation enabled? argv[0] absolute + on allowlist?
+- [x] In `fire`: if block has `run`, enforce — automation enabled? argv[0] absolute + on allowlist?
       plan file owned-by-user + not world-writable? Else exit `5` + log; never run.
-- [ ] Execute as an **argv vector, no shell**; capture exit/stdout/stderr tail; enforce `timeout`
+- [x] Execute as an **argv vector, no shell**; capture exit/stdout/stderr tail; enforce `timeout`
       (kill on overrun); append a structured line to `fire.log`. At-most-once already guaranteed by the
       ledger (Stage 3) — assert it: a duplicate `fire` does not re-run.
-- [ ] `--dry-run` on `apply`/`fire` prints the command without executing.
-- [ ] Tests: policy matrix (disabled / not-allowlisted / not-absolute / bad-perms → refused; allowed →
+- [x] `--dry-run` on `apply`/`fire` prints the command without executing.
+- [x] Tests: policy matrix (disabled / not-allowlisted / not-absolute / bad-perms → refused; allowed →
       runs). Execute a harmless real binary in tests (e.g. the platform's `true`/`cmd /c exit 0`, or a
       tiny test helper bin), never arbitrary input. Timeout test with a sleeping helper. Ownership/perms
       test via `assert_fs` (Unix perms `#[cfg(unix)]`-gated). Duplicate-fire no-op test.
 
 **Acceptance Gate:**
-- [ ] DoD green; automation policy logic at 100%. Audit + notes updated.
+- [x] DoD green; automation policy logic at 100%. Audit + notes updated.
 
 **Commit:** `feat: allow-listed, no-shell, at-most-once run: automation with timeout and logging`
 
@@ -630,34 +630,34 @@ tested agent skill** so agents can install and use `ccplan` — with automated c
 **Preconditions:** Stage 7 gate green.
 
 **Steps:**
-- [ ] **Dual license:** rename existing `LICENSE` → `LICENSE-APACHE`; add `LICENSE-MIT`; confirm
+- [x] **Dual license:** rename existing `LICENSE` → `LICENSE-APACHE`; add `LICENSE-MIT`; confirm
       `Cargo.toml` `license = "MIT OR Apache-2.0"`.
-- [ ] OSS files: `CONTRIBUTING.md` (conventional commits, how to run the DoD gate, **links to
+- [x] OSS files: `CONTRIBUTING.md` (conventional commits, how to run the DoD gate, **links to
       `CONVENTIONS.md`** as the coding standard),
       `CODE_OF_CONDUCT.md` (Contributor Covenant 2.1), `SECURITY.md` (the `run:` threat model + private
       reporting), `CHANGELOG.md` (keep-a-changelog header), `.github/ISSUE_TEMPLATE/{bug,feature}.yml`,
       `.github/PULL_REQUEST_TEMPLATE.md`.
-- [ ] **Agent skill + AGENTS.md (D20):** write `AGENTS.md` (canonical recipe) and the loadable skill
+- [x] **Agent skill + AGENTS.md (D20):** write `AGENTS.md` (canonical recipe) and the loadable skill
       `skills/ccplan/SKILL.md` with valid frontmatter (`name`, `description`, when-to-use) covering:
       non-interactive install (`cargo binstall ccplan` / shell installer) + `ccplan --version` + `ccplan
       doctor` verification, the `set --from -` → `apply` recipe, the exit-code table, and the `--json`
       array contract. Keep the skill's commands copy-pasteable and current with the real CLI.
-- [ ] **Agent-onboarding test** (`tests/agent_docs.rs`): (a) parse `skills/ccplan/SKILL.md` frontmatter
+- [x] **Agent-onboarding test** (`tests/agent_docs.rs`): (a) parse `skills/ccplan/SKILL.md` frontmatter
       and assert required fields exist; (b) extract the recipe's `ccplan …` commands and **run them via
       `assert_cmd` against a temp store** (with a fake/headless scheduler) asserting success + expected
       JSON — so the documented agent flow can never silently drift from the real CLI. Keep `AGENTS.md`
       and `SKILL.md` in sync (one is the source, the other generated/checked, or a test asserts they match).
-- [ ] **release-plz** workflow (`.github/workflows/release-plz.yml`) on `main` — maintains the release
+- [x] **release-plz** workflow (`.github/workflows/release-plz.yml`) on `main` — maintains the release
       PR + tags on merge (notes §2 versions).
-- [ ] **dist / cargo-dist** (`dist init`): configure `[workspace.metadata.dist]` with installers
+- [x] **dist / cargo-dist** (`dist init`): configure `[workspace.metadata.dist]` with installers
       `["shell","powershell","homebrew","msi"]`, the five targets, `tap` for Homebrew; generate
       `.github/workflows/release.yml` (triggers on `v*.*.*` tag). Add `[package.metadata.binstall]` for
       `cargo binstall`. Have the release package the completions + man page.
-- [ ] README badges point at the real CI/coverage/crates/license once IDs exist.
-- [ ] `cargo-deny` clean with **no** `unmaintained`/advisory allow-list entries needed (dependency set is advisory-clean).
+- [x] README badges point at the real CI/coverage/crates/license once IDs exist.
+- [x] `cargo-deny` clean with **no** `unmaintained`/advisory allow-list entries needed (dependency set is advisory-clean).
 
 **Acceptance Gate:**
-- [ ] DoD green. `dist plan` succeeds locally (dry plan of artifacts). `release-plz` workflow validates.
+- [x] DoD green. `dist plan` succeeds locally (dry plan of artifacts). `release-plz` workflow validates.
       Audit + notes updated.
 
 **Commit:** `chore: dual license, OSS docs, and automated cross-platform release pipeline`
@@ -721,13 +721,13 @@ tested agent skill** so agents can install and use `ccplan` — with automated c
 | 5 | Native backends & doctor | [x] | — | 2026-06-08 | `7410f0d` |
 | 6 | run: automation & security | [x] | 128 | 2026-06-08 | `b3ab747` + correction pass (`1add9be`…`cfe8fb3`) |
 | 7 | Completions & man page | [x] | 131 | 2026-06-08 | `41b144a` |
-| 8 | OSS hygiene & release | [ ] | | | |
+| 8 | OSS hygiene & release | [x] | 137 | 2026-06-08 | `chore: dual license, OSS docs, and automated cross-platform release pipeline` |
 | 9 | Production readiness & ship | [ ] | | | |
 
-> **Handoff note (2026-06-08):** Stages 0–7 implemented; full DoD gate green on Linux
-> (131 passed / 0 failed / 0 filtered out, 1 sanctioned ignored test; 100% line+function coverage;
-> clippy/deny/fmt clean; anti-gaming guards #1+#2 pass). All P1 backlog items resolved (B-006/007/008/
-> 011/012/014). **Next: Stage 8 (OSS hygiene, agent skill, release engineering).** Per-stage "Tests (passed)" was not
+> **Handoff note (2026-06-08):** Stages 0–8 implemented; full DoD gate green on Linux
+> (137 passed / 0 failed / 0 filtered out, 1 sanctioned ignored test; 100% line+function coverage;
+> clippy/deny/fmt clean; anti-gaming guards #1+#2 pass; `dist plan` green). All P1 backlog items
+> resolved (B-006/007/008/011/012/014). **Next: Stage 9 (production readiness and ship).** Per-stage "Tests (passed)" was not
 > recorded for stages 1/2/3/5 by earlier sessions (`—`); the cumulative total is authoritative and
 > lives in the latest `audit_log.md` entry. `schtasks.rs`/`launchd.rs` are CI-verified only (don't
 > compile on the Linux dev box).

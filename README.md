@@ -4,10 +4,9 @@
 
 **A plain-text, agent-fillable day planner that actually *does things* — notify, mark done, and run commands at the right time.**
 
-<!-- Badges are wired up during the release stage; placeholders until first publish. -->
-[![CI](https://img.shields.io/badge/CI-pending-lightgrey)](#)
-[![coverage](https://img.shields.io/badge/coverage-100%25-brightgreen)](#)
-[![crates.io](https://img.shields.io/badge/crates.io-unpublished-lightgrey)](#)
+[![CI](https://github.com/ankitkpandey1/cc-planner/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/ankitkpandey1/cc-planner/actions/workflows/ci.yml)
+[![coverage](https://codecov.io/gh/ankitkpandey1/cc-planner/branch/main/graph/badge.svg)](https://codecov.io/gh/ankitkpandey1/cc-planner)
+[![crates.io](https://img.shields.io/crates/v/ccplan.svg)](https://crates.io/crates/ccplan)
 [![license](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)](#license)
 
 </div>
@@ -182,7 +181,7 @@ id     = "focus-1"                 # stable, unique within the day
 title  = "Focus time"
 start  = "11:00"                   # local wall-clock
 end    = "11:30"                   # OR  duration = "30m"  (exactly one)
-notify = "0m"                      # lead-time notification before start
+notify = "5m"                      # lead-time notification before start
 tags   = ["deep-work"]
 status = "pending"                 # pending | active | done | skipped | missed | expired
 

@@ -1208,3 +1208,172 @@ B-015 (`is_lock_contention` narrowing), B-016 (status overcount).
 - [x] Runtime `ccplan completions <shell>` prints generated scripts to stdout.
 - [x] Tests cover every supported shell and generated artifact files.
 - [x] DoD green; notes, checklist, and audit updated.
+
+---
+
+## Stage 8 — OSS hygiene, agent skill & release engineering — 2026-06-08
+
+**Commit(s):** `chore: dual license, OSS docs, and automated cross-platform release pipeline`   ·   **Branch:** dev
+
+### A. Recon summary
+- Re-read `development/goal_prompt.md`, `development/notes.md`, `development/backlog.md`,
+  `development/implementation_checklist.md`, `Reviews.md`, `DESIGN.md`, and `CONVENTIONS.md`.
+- Re-ran the previous Stage 7/global gate before implementation: fmt, anti-gaming guards, clippy,
+  all-features tests, 100% line coverage, cargo-deny, release build, Linux native integration, MSRV
+  check, and timer cleanup were green.
+- Checked official docs for cargo-dist 0.32.0 configuration/generation, release-plz GitHub Action
+  quickstart (`release-plz/release-plz-action@v0.5`), cargo-deny target/metadata behavior, and
+  cargo-binstall metadata variables/format overrides. Checked local skill frontmatter conventions
+  from the installed skill-creator examples.
+
+### B. What was built
+- Renamed `LICENSE` to `LICENSE-APACHE`; added `LICENSE-MIT`; kept `Cargo.toml` dual license
+  `MIT OR Apache-2.0`.
+- Added OSS files: `CONTRIBUTING.md`, `CODE_OF_CONDUCT.md`, `SECURITY.md`, `CHANGELOG.md`, issue
+  templates, and PR template. README badges now point to CI, Codecov, crates.io, and license.
+- Added `AGENTS.md` and `skills/ccplan/SKILL.md` with a synchronized marked canonical recipe covering
+  non-interactive install, `ccplan --version`, `ccplan doctor`, `set --from -`, `apply`, exit codes,
+  and the JSON array contract.
+- Added `tests/agent_docs.rs`, which parses skill frontmatter, checks AGENTS/SKILL recipe sync, and
+  runs the documented commands against a temp store with fake/headless backends.
+- Added a hidden, feature-gated `CCPLAN_TEST_FAKE_BACKENDS=1` runtime hook that uses `FixedClock`,
+  `RecordingScheduler`, and `RecordingNotifier` for black-box agent docs tests without touching the
+  real scheduler.
+- Added release metadata: package authors/homepage, explicit `[[bin]]` declarations for `ccplan` and
+  `ccplan-fire`, cargo-binstall metadata matching cargo-dist `.tar.xz`/`.zip` artifacts, cargo-dist
+  workspace metadata for shell/PowerShell/Homebrew/MSI installers and five targets, Homebrew tap
+  publishing, WiX metadata, and `profile.dist`.
+- Generated `.github/workflows/release.yml` and `wix/main.wxs` with cargo-dist; added
+  `.github/workflows/release-plz.yml` for `main`.
+- Added `scripts/build-release-assets.sh` to package completions and the generated man page as
+  cargo-dist extra artifacts.
+- Resolved B-002 with a CI cargo-deny matrix that generates target-filtered cargo metadata for all
+  five release targets before running cargo-deny. Resolved B-005 by proving every archive/MSI includes
+  both `ccplan` and `ccplan-fire`.
+
+### C. Self-review findings & fixes
+- Initial red tests failed because `AGENTS.md` and `skills/ccplan/SKILL.md` did not exist; after
+  implementation, the agent and release doc tests passed.
+- First cargo-dist attempt rejected `[package.metadata.dist].binaries = [...]`; that key is a
+  cargo-dist map, not a Cargo package binary list. Fixed by using explicit Cargo `[[bin]]`
+  declarations and adjusted the test to assert those.
+- Widening `deny.toml` to one union graph across all release targets pulled inactive notify-rust
+  transitive deps and failed on stale `time` plus duplicate `windows-link`. Fixed by keeping local
+  deny scoped to Linux and adding CI target-filtered metadata checks for each release target.
+- `dist generate --mode msi --check` exposed the missing `wix/main.wxs`; generated and committed it,
+  then added a test asserting both Windows binaries are present in the template.
+- The first binstall metadata used `.tar.gz`; cargo-dist actually emits `.tar.xz` for Unix and `.zip`
+  for Windows. Fixed `pkg-url` to use `{ archive-format }`, default `pkg-fmt = "txz"`, and a Windows
+  `pkg-fmt = "zip"` override.
+- `release-plz release --dry-run --allow-dirty` cannot complete locally without a real GitHub token;
+  with a dummy token it reaches the GitHub API and fails 401 while querying PR metadata. Workflow YAML
+  parsing and the release-doc test are the local validation; the real workflow runs on `main` with
+  GitHub credentials.
+
+### D. Evidence
+- Stage 8 focused tests:
+  ```text
+  cargo test --all-features --test agent_docs --test release_docs
+  agent_docs: 3 passed; release_docs: 3 passed
+  ```
+- `cargo fmt --all -- --check`:
+  ```text
+  <no output; exit 0>
+  ```
+- Anti-gaming guards:
+  ```text
+  no module-scope coverage(off) in src; exit 0
+  no std::env::temp_dir/env::temp_dir in tests; exit 0
+  ```
+- `cargo clippy --all-targets --all-features -- -D warnings`:
+  ```text
+  Finished `dev` profile [unoptimized + debuginfo] target(s) in 5.76s
+  ```
+- `cargo test --all-features --workspace`:
+  ```text
+  137 passed; 0 failed; 0 filtered out; 1 ignored (sanctioned Linux integration)
+  ```
+- `RUSTFLAGS="--cfg coverage_nightly" cargo +nightly llvm-cov --all-features --workspace --fail-under-lines 100`:
+  ```text
+  TOTAL 2434 lines, 0 missed lines, 100.00% line cover
+  TOTAL 333 functions, 0 missed functions, 100.00% function cover
+  ```
+- `cargo deny check`:
+  ```text
+  advisories ok, bans ok, licenses ok, sources ok
+  ```
+- Target-filtered cargo-deny matrix, run locally for all five release targets:
+  ```text
+  x86_64-unknown-linux-gnu: advisories ok, bans ok, licenses ok, sources ok
+  aarch64-unknown-linux-gnu: advisories ok, bans ok, licenses ok, sources ok
+  x86_64-apple-darwin: advisories ok, bans ok, licenses ok, sources ok
+  aarch64-apple-darwin: advisories ok, bans ok, licenses ok, sources ok
+  x86_64-pc-windows-msvc: advisories ok, bans ok, licenses ok, sources ok
+  ```
+- `cargo build --release`:
+  ```text
+  Finished `release` profile [optimized] target(s) in 0.39s
+  ```
+- `cargo +1.85.0 check --all-features --workspace`:
+  ```text
+  Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.69s
+  ```
+- `cargo test --test integration_linux -- --ignored --nocapture`:
+  ```text
+  running
+  test systemd_apply_creates_and_clear_removes_timer ... ok
+  test result: ok. 1 passed; 0 failed; 0 ignored
+  ```
+- `scripts/build-release-assets.sh`:
+  ```text
+  generated target/dist-assets/completions/{ccplan.bash,_ccplan,ccplan.fish,_ccplan.ps1}
+  generated target/dist-assets/man/ccplan.1
+  ```
+- `dist generate --mode ci --check` and `dist generate --mode msi --check`:
+  ```text
+  <no output; exit 0>
+  ```
+- `dist plan --allow-dirty`:
+  ```text
+  announces v1.0.0; shell + PowerShell installers; Homebrew formula; Windows MSI;
+  five archives; every archive/MSI includes ccplan and ccplan-fire
+  ```
+- Workflow YAML parse:
+  ```text
+  ok .github/workflows/release-plz.yml
+  ok .github/workflows/release.yml
+  ok .github/workflows/ci.yml
+  ```
+- Post-integration cleanup:
+  ```text
+  systemctl --user list-timers 'ccplan-*' --all --no-pager
+  0 timers listed.
+  ```
+
+### E. Reflection & learnings
+- cargo-dist config names are easy to misread because the old `[dist]` namespace is reused under
+  Cargo metadata. Use Cargo's own `[[bin]]` for package binaries; do not invent a dist `binaries`
+  array.
+- Dependency policy across targets needs target-filtered metadata. A one-shot union graph is stricter
+  than the shipped release graph and can fail on inactive transitive deps while every actual target
+  graph is clean.
+- Generated release files deserve generated-file checks. `dist generate --mode ci --check` and
+  `--mode msi --check` caught drift that ordinary unit tests would not.
+- Binstall metadata must be checked against the actual archive names from `dist plan`, not assumed
+  from examples.
+
+### F. Backlog items raised/closed
+- Raised: none.
+- Closed: B-002, B-005.
+- Still open before/at Stage 9: B-003, B-004, B-009, B-010, B-013, B-015, B-016.
+
+### G. Acceptance-gate confirmation
+- [x] Dual license files present and Cargo license is `MIT OR Apache-2.0`.
+- [x] OSS docs/templates present and tested.
+- [x] Agent skill + AGENTS.md present, synchronized, and tested through black-box documented commands.
+- [x] release-plz workflow present on `main` and YAML-valid.
+- [x] cargo-dist release workflow and WiX template generated and checked.
+- [x] `dist plan --allow-dirty` succeeds and includes completions, man page, shell/PowerShell/Homebrew/MSI, and both binaries.
+- [x] README badges point at real CI/coverage/crates/license.
+- [x] cargo-deny clean with no advisory/unmaintained allowlist entries.
+- [x] DoD green; notes, backlog, checklist, and audit updated.

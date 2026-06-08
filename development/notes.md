@@ -96,7 +96,7 @@ unexpected_cfgs = { level = "warn", check-cfg = ['cfg(coverage,coverage_nightly)
 
 Tooling (installed in CI, not deps): `cargo-llvm-cov`, `cargo-deny`, `cargo-dist` (`dist`),
 `release-plz`. CI actions: `dtolnay/rust-toolchain`, `Swatinem/rust-cache@v2`,
-`taiki-e/install-action`, `codecov/codecov-action@v5`, `release-plz/release-plz-action@v0.5`,
+`taiki-e/install-action`, `codecov/codecov-action@v7`, `release-plz/release-plz-action@v0.5`,
 `EmbarkStudios/cargo-deny-action@v2`.
 
 ---
@@ -221,6 +221,40 @@ Tooling (installed in CI, not deps): `cargo-llvm-cov`, `cargo-deny`, `cargo-dist
 
 > Format: `### YYYY-MM-DD — <stage/topic>` then bullets. Record decisions, surprises, dead-ends,
 > and anything a future session must know. This is the anti-amnesia log.
+
+### 2026-06-08 — Stage 8 OSS hygiene, agent skill, and release engineering
+- Stage 8 precondition: re-read goal prompt, notes, backlog, checklist, Reviews, DESIGN, and
+  CONVENTIONS; re-ran the Stage 7/global gate before implementation. No open P1 blockers.
+- Dual-license layout is now the Rust ecosystem convention: existing Apache text moved to
+  `LICENSE-APACHE`, new `LICENSE-MIT`, and `Cargo.toml` remains `license = "MIT OR Apache-2.0"`.
+- OSS hygiene files are now present: CONTRIBUTING, CODE_OF_CONDUCT (Contributor Covenant 2.1),
+  SECURITY (including `run:`/`allowed_executables` threat model and private reporting), CHANGELOG
+  (Keep a Changelog shape), issue templates, and PR template.
+- `AGENTS.md` and `skills/ccplan/SKILL.md` contain a byte-identical marked canonical recipe. The
+  skill also contains marked smoke-test plan/commands; `tests/agent_docs.rs` parses the frontmatter,
+  checks AGENTS/SKILL recipe sync, and runs `--version`, `doctor`, `set --from -`, `apply`,
+  `show --json`, and `agenda --json` through the real binary against an isolated temp store.
+- To make that agent-doc smoke test headless, `run()` has a feature-gated test hook:
+  `CCPLAN_TEST_FAKE_BACKENDS=1` + `feature = "test-fakes"` builds a context with `FixedClock`,
+  `RecordingScheduler`, and `RecordingNotifier`. Normal builds keep using native backends.
+- cargo-dist 0.32.0 metadata lives in `[workspace.metadata.dist]` with shell, PowerShell, Homebrew,
+  and MSI installers; five release targets; Homebrew tap `ankitkpandey1/homebrew-tap`; and
+  `publish-jobs = ["homebrew"]`. Generated files include `.github/workflows/release.yml` and
+  `wix/main.wxs`, both checked with `dist generate --mode … --check`.
+- Release asset packaging uses `scripts/build-release-assets.sh` to rebuild the release binary,
+  generate bash/zsh/fish/PowerShell completions through the runtime `ccplan completions` command, and
+  copy the generated `ccplan.1` man page into `target/dist-assets`.
+- Binstall metadata must match cargo-dist archive names. cargo-dist emits `.tar.xz` for Unix and
+  `.zip` for Windows, so Stage 8 uses `pkg-url = "...ccplan-{ target }.{ archive-format }"`,
+  `pkg-fmt = "txz"`, and a Windows override `pkg-fmt = "zip"`.
+- B-002 resolved without broadening `deny.toml` into a union graph. A single union graph pulls
+  inactive notify-rust transitive target deps and hits stale `time`/duplicate `windows-link` issues.
+  CI now generates target-filtered cargo metadata per release target and runs cargo-deny against each
+  metadata file; local checks passed for all five targets.
+- `release-plz release --dry-run` cannot complete locally without a real GitHub token: it queries
+  GitHub PR metadata before packaging and returns 401 for a dummy token. Stage 8 validation is the
+  workflow YAML parse plus the release-doc test asserting the official action and commands. The real
+  workflow runs only on `main` with `GITHUB_TOKEN`/`CARGO_REGISTRY_TOKEN` available.
 
 ### 2026-06-08 — Stage 6 Config model + run: execution & security policy
 - Stage 6 precondition: re-read notes/backlog/checklist plus DESIGN §9 and resolved P1 blockers.

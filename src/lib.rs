@@ -43,6 +43,12 @@ where
 {
     let store = runtime_store()?;
     let config = Config::load(&store).map_err(|e| error::Error::Usage(e.to_string()))?;
+
+    #[cfg(feature = "test-fakes")]
+    if std::env::var_os("CCPLAN_TEST_FAKE_BACKENDS").is_some() {
+        return run_with_test_backends(cli, &mut out, store, config);
+    }
+
     let context = Context::new(
         store,
         SystemClock,
@@ -52,6 +58,30 @@ where
     );
     run_with_context(cli, &mut out, &context)?;
     Ok(())
+}
+
+#[cfg(feature = "test-fakes")]
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn run_with_test_backends<W>(cli: cli::Cli, out: &mut W, store: Store, config: Config) -> Result<()>
+where
+    W: Write,
+{
+    use context::{RecordingNotifier, RecordingScheduler};
+    use time::FixedClock;
+
+    let now = std::env::var("CCPLAN_TEST_NOW")
+        .unwrap_or_else(|_| "2099-01-01T08:00:00+00:00[UTC]".to_owned());
+    let now = now
+        .parse()
+        .map_err(|error| error::Error::Usage(format!("invalid CCPLAN_TEST_NOW: {error}")))?;
+    let context = Context::new(
+        store,
+        FixedClock::new(now),
+        RecordingScheduler::default(),
+        RecordingNotifier::default(),
+        config,
+    );
+    run_with_context(cli, out, &context)
 }
 
 /// Runs a parsed invocation against an injected context.
