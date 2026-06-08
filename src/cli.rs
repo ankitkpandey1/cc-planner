@@ -144,6 +144,8 @@ pub struct FireArgs {
     pub rev: ScheduleRev,
     #[arg(long)]
     pub at: Timestamp,
+    #[arg(long)]
+    pub dry_run: bool,
 }
 
 #[derive(Debug, Args)]

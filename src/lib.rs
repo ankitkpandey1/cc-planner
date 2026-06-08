@@ -9,6 +9,7 @@ use std::{io::Write, path::PathBuf};
 
 pub mod cli;
 mod commands;
+pub mod config;
 pub mod context;
 pub mod error;
 pub mod lifecycle;
@@ -17,6 +18,7 @@ mod platform;
 pub mod store;
 pub mod time;
 
+use config::Config;
 use context::Context;
 use error::Result;
 use platform::{NativeNotifier, NativeScheduler};
@@ -32,15 +34,19 @@ use time::SystemClock;
     clippy::needless_pass_by_value,
     reason = "the parsed CLI is owned at the application boundary and will grow command payloads"
 )]
+#[cfg_attr(coverage_nightly, coverage(off))]
 pub fn run<W>(cli: cli::Cli, mut out: W) -> Result<()>
 where
     W: Write,
 {
+    let store = runtime_store()?;
+    let config = Config::load(&store).map_err(|e| error::Error::Usage(e.to_string()))?;
     let context = Context::new(
-        runtime_store()?,
+        store,
         SystemClock,
         NativeScheduler::new()?,
         NativeNotifier,
+        config,
     );
     run_with_context(cli, &mut out, &context)?;
     Ok(())

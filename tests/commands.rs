@@ -1,6 +1,7 @@
 use assert_fs::TempDir;
 use ccplan::{
     cli::Cli,
+    config::Config,
     context::{
         Context, Notification, Notifier, NotifyError, RecordingNotifier, RecordingScheduler,
         Scheduler, SchedulerCall, SchedulerError,
@@ -61,7 +62,7 @@ fn set_and_show_json_round_trip_with_fake_context() {
                 {
                     "duration": "30m",
                     "id": "lunch",
-                    "notify": "0m",
+                    "notify": "5m",
                     "start": "14:00",
                     "status": "pending",
                     "tags": [],
@@ -655,13 +656,33 @@ fn fire_covers_missing_notify_missed_close_and_run_deferred_paths() {
     );
     assert_eq!(notify_context.notifier.notifications().len(), 1);
 
-    let (_temp, run_context) = test_context_at("2026-06-08T11:00:00+05:30[Asia/Kolkata]");
+    let (_temp, mut run_context) = test_context_at("2026-06-08T11:00:00+05:30[Asia/Kolkata]");
+    let exe = if cfg!(windows) {
+        "C:\\Windows\\System32\\cmd.exe"
+    } else {
+        "/bin/echo"
+    };
+    run_context.config.automation.enabled = true;
+    run_context.config.automation.allowed_executables = vec![std::path::PathBuf::from(exe)];
     let mut run_plan = plan();
-    run_plan.blocks[0].run = Some(Run::new(vec!["/bin/echo".to_owned()]).unwrap());
+    let run_argv = if cfg!(windows) {
+        vec![exe.to_owned(), "/c".to_owned(), "echo".to_owned()]
+    } else {
+        vec![exe.to_owned()]
+    };
+    run_plan.blocks[0].run = Some(Run::new(run_argv).unwrap());
     run_context
         .store
         .set_plan(&run_plan, HistoryPolicy::Preserve)
         .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let plan_path = run_context.store.plan_path(&run_plan.date);
+        let mut perms = std::fs::metadata(&plan_path).unwrap().permissions();
+        perms.set_mode(0o600);
+        std::fs::set_permissions(&plan_path, perms).unwrap();
+    }
     let rev = focus_rev(&run_context);
     run_ok(
         &run_context,
@@ -670,7 +691,7 @@ fn fire_covers_missing_notify_missed_close_and_run_deferred_paths() {
     assert!(
         std::fs::read_to_string(run_context.store.fire_log_path())
             .unwrap()
-            .contains("run-deferred")
+            .contains("activated run")
     );
 
     let (_temp, missed_context) = test_context_at("2026-06-08T11:02:00+05:30[Asia/Kolkata]");
@@ -902,6 +923,7 @@ fn test_context_at(
         clock,
         RecordingScheduler::default(),
         RecordingNotifier::default(),
+        Config::default(),
     );
     (temp, context)
 }
@@ -915,7 +937,13 @@ fn failing_notifier_context_at(
     let temp = TempDir::new().unwrap();
     let store = Store::new(temp.path());
     let clock = FixedClock::new(now.parse::<Zoned>().unwrap());
-    let context = Context::new(store, clock, RecordingScheduler::default(), FailingNotifier);
+    let context = Context::new(
+        store,
+        clock,
+        RecordingScheduler::default(),
+        FailingNotifier,
+        Config::default(),
+    );
     (temp, context)
 }
 
@@ -933,6 +961,7 @@ fn list_failing_scheduler_context_at(
         clock,
         ListFailingScheduler,
         RecordingNotifier::default(),
+        Config::default(),
     );
     (temp, context)
 }
@@ -1028,4 +1057,277 @@ fn _timestamp(value: &str) -> Timestamp {
 #[allow(dead_code)]
 fn _grace() -> SignedDuration {
     SignedDuration::from_secs(90)
+}
+
+#[test]
+fn test_automation_refused_when_disabled() {
+    let (_temp, mut context) = test_context_at("2026-06-08T11:00:00+05:30[Asia/Kolkata]");
+    context.config.automation.enabled = false;
+    let mut run_plan = plan();
+    run_plan.blocks[0].run = Some(Run::new(vec!["/bin/echo".to_owned()]).unwrap());
+    context
+        .store
+        .set_plan(&run_plan, HistoryPolicy::Preserve)
+        .unwrap();
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let plan_path = context.store.plan_path(&run_plan.date);
+        let mut perms = std::fs::metadata(&plan_path).unwrap().permissions();
+        perms.set_mode(0o600);
+        std::fs::set_permissions(&plan_path, perms).unwrap();
+    }
+
+    let rev = focus_rev(&context);
+    let err = run_err(
+        &context,
+        fire_args("focus", "start", rev.as_str(), "2026-06-08T05:30:00Z"),
+    );
+    assert!(
+        matches!(err, Error::AutomationRefused(ref msg) if msg.contains("automation is disabled"))
+    );
+}
+
+#[test]
+fn test_automation_refused_when_not_absolute() {
+    let (_temp, mut context) = test_context_at("2026-06-08T11:00:00+05:30[Asia/Kolkata]");
+    context.config.automation.enabled = true;
+    context.config.automation.allowed_executables = vec![std::path::PathBuf::from("echo")];
+    let mut run_plan = plan();
+    run_plan.blocks[0].run = Some(Run::new(vec!["echo".to_owned()]).unwrap());
+    context
+        .store
+        .set_plan(&run_plan, HistoryPolicy::Preserve)
+        .unwrap();
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let plan_path = context.store.plan_path(&run_plan.date);
+        let mut perms = std::fs::metadata(&plan_path).unwrap().permissions();
+        perms.set_mode(0o600);
+        std::fs::set_permissions(&plan_path, perms).unwrap();
+    }
+
+    let rev = focus_rev(&context);
+    let err = run_err(
+        &context,
+        fire_args("focus", "start", rev.as_str(), "2026-06-08T05:30:00Z"),
+    );
+    assert!(
+        matches!(err, Error::AutomationRefused(ref msg) if msg.contains("executable path is not absolute"))
+    );
+}
+
+#[test]
+fn test_automation_refused_when_not_allowlisted() {
+    let (_temp, mut context) = test_context_at("2026-06-08T11:00:00+05:30[Asia/Kolkata]");
+    context.config.automation.enabled = true;
+    context.config.automation.allowed_executables =
+        vec![std::path::PathBuf::from("/bin/different")];
+    let mut run_plan = plan();
+    run_plan.blocks[0].run = Some(Run::new(vec!["/bin/echo".to_owned()]).unwrap());
+    context
+        .store
+        .set_plan(&run_plan, HistoryPolicy::Preserve)
+        .unwrap();
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let plan_path = context.store.plan_path(&run_plan.date);
+        let mut perms = std::fs::metadata(&plan_path).unwrap().permissions();
+        perms.set_mode(0o600);
+        std::fs::set_permissions(&plan_path, perms).unwrap();
+    }
+
+    let rev = focus_rev(&context);
+    let err = run_err(
+        &context,
+        fire_args("focus", "start", rev.as_str(), "2026-06-08T05:30:00Z"),
+    );
+    assert!(
+        matches!(err, Error::AutomationRefused(ref msg) if msg.contains("executable not in allowlist"))
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn test_automation_refused_when_bad_permissions() {
+    let (_temp, mut context) = test_context_at("2026-06-08T11:00:00+05:30[Asia/Kolkata]");
+    context.config.automation.enabled = true;
+    context.config.automation.allowed_executables = vec![std::path::PathBuf::from("/bin/echo")];
+    let mut run_plan = plan();
+    run_plan.blocks[0].run = Some(Run::new(vec!["/bin/echo".to_owned()]).unwrap());
+    context
+        .store
+        .set_plan(&run_plan, HistoryPolicy::Preserve)
+        .unwrap();
+
+    // Set permissions to world-writable (0o666)
+    use std::os::unix::fs::PermissionsExt;
+    let plan_path = context.store.plan_path(&run_plan.date);
+    let mut perms = std::fs::metadata(&plan_path).unwrap().permissions();
+    perms.set_mode(0o666);
+    std::fs::set_permissions(&plan_path, perms).unwrap();
+
+    let rev = focus_rev(&context);
+    let err = run_err(
+        &context,
+        fire_args("focus", "start", rev.as_str(), "2026-06-08T05:30:00Z"),
+    );
+    assert!(
+        matches!(err, Error::AutomationRefused(ref msg) if msg.contains("plan file is group- or world-writable"))
+    );
+}
+
+#[test]
+fn test_automation_runs_and_kills_on_timeout() {
+    let (_temp, mut context) = test_context_at("2026-06-08T11:00:00+05:30[Asia/Kolkata]");
+    let exe = if cfg!(windows) {
+        "C:\\Windows\\System32\\ping.exe"
+    } else {
+        "/bin/sleep"
+    };
+    let run_argv = if cfg!(windows) {
+        vec![
+            exe.to_owned(),
+            "-n".to_owned(),
+            "10".to_owned(),
+            "127.0.0.1".to_owned(),
+        ]
+    } else {
+        vec![exe.to_owned(), "10".to_owned()]
+    };
+    context.config.automation.enabled = true;
+    context.config.automation.allowed_executables = vec![std::path::PathBuf::from(exe)];
+    context.config.automation.timeout = ccplan::model::DurationSpec::from_seconds(1).unwrap();
+
+    let mut run_plan = plan();
+    run_plan.blocks[0].run = Some(Run::new(run_argv).unwrap());
+    context
+        .store
+        .set_plan(&run_plan, HistoryPolicy::Preserve)
+        .unwrap();
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let plan_path = context.store.plan_path(&run_plan.date);
+        let mut perms = std::fs::metadata(&plan_path).unwrap().permissions();
+        perms.set_mode(0o600);
+        std::fs::set_permissions(&plan_path, perms).unwrap();
+    }
+
+    let rev = focus_rev(&context);
+    run_ok(
+        &context,
+        fire_args("focus", "start", rev.as_str(), "2026-06-08T05:30:00Z"),
+    );
+
+    let log_content = std::fs::read_to_string(context.store.fire_log_path()).unwrap();
+    assert!(
+        log_content.contains("outcome=timeout"),
+        "log should contain timeout: {}",
+        log_content
+    );
+}
+
+#[test]
+fn test_automation_dry_run_prints_command() {
+    let (_temp, mut context) = test_context_at("2026-06-08T11:00:00+05:30[Asia/Kolkata]");
+    let exe = if cfg!(windows) {
+        "C:\\Windows\\System32\\cmd.exe"
+    } else {
+        "/bin/echo"
+    };
+    context.config.automation.enabled = true;
+    context.config.automation.allowed_executables = vec![std::path::PathBuf::from(exe)];
+
+    let mut run_plan = plan();
+    let run_argv = if cfg!(windows) {
+        vec![
+            exe.to_owned(),
+            "/c".to_owned(),
+            "echo".to_owned(),
+            "hello".to_owned(),
+        ]
+    } else {
+        vec![exe.to_owned(), "hello".to_owned()]
+    };
+    run_plan.blocks[0].run = Some(Run::new(run_argv).unwrap());
+    context
+        .store
+        .set_plan(&run_plan, HistoryPolicy::Preserve)
+        .unwrap();
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let plan_path = context.store.plan_path(&run_plan.date);
+        let mut perms = std::fs::metadata(&plan_path).unwrap().permissions();
+        perms.set_mode(0o600);
+        std::fs::set_permissions(&plan_path, perms).unwrap();
+    }
+
+    let rev = focus_rev(&context);
+
+    let mut args = fire_args("focus", "start", rev.as_str(), "2026-06-08T05:30:00Z");
+    args.push("--dry-run".to_owned());
+
+    let output = run_ok(&context, args);
+    let output_str = String::from_utf8_lossy(&output);
+    assert!(output_str.contains("dry-run: would run command"));
+
+    let log_content = std::fs::read_to_string(context.store.fire_log_path()).unwrap();
+    assert!(log_content.contains("activated run (dry-run)"));
+}
+
+#[test]
+fn test_automation_truncates_large_output() {
+    let (_temp, mut context) = test_context_at("2026-06-08T11:00:00+05:30[Asia/Kolkata]");
+    let exe = if cfg!(windows) {
+        "C:\\Windows\\System32\\cmd.exe"
+    } else {
+        "/usr/bin/seq"
+    };
+    let run_argv = if cfg!(windows) {
+        vec![
+            exe.to_owned(),
+            "/c".to_owned(),
+            "for /L %i in (1,1,600) do @echo aaaaaaaaaa".to_owned(),
+        ]
+    } else {
+        vec![exe.to_owned(), "1".to_owned(), "2000".to_owned()]
+    };
+    context.config.automation.enabled = true;
+    context.config.automation.allowed_executables = vec![std::path::PathBuf::from(exe)];
+    context.config.automation.timeout = ccplan::model::DurationSpec::from_seconds(5).unwrap();
+
+    let mut run_plan = plan();
+    run_plan.blocks[0].run = Some(Run::new(run_argv).unwrap());
+    context
+        .store
+        .set_plan(&run_plan, HistoryPolicy::Preserve)
+        .unwrap();
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let plan_path = context.store.plan_path(&run_plan.date);
+        let mut perms = std::fs::metadata(&plan_path).unwrap().permissions();
+        perms.set_mode(0o600);
+        std::fs::set_permissions(&plan_path, perms).unwrap();
+    }
+
+    let rev = focus_rev(&context);
+    run_ok(
+        &context,
+        fire_args("focus", "start", rev.as_str(), "2026-06-08T05:30:00Z"),
+    );
+
+    let log_content = std::fs::read_to_string(context.store.fire_log_path()).unwrap();
+    assert!(log_content.contains("outcome=success"));
+    assert!(log_content.contains("stdout="));
 }

@@ -14,7 +14,7 @@ use thiserror::Error;
 
 use crate::{
     lifecycle::Event,
-    model::{BlockId, Plan, PlanDate, PlanError, ScheduleRev},
+    model::{BlockId, Lead, Plan, PlanDate, PlanError, ScheduleRev},
 };
 
 #[derive(Debug, Clone)]
@@ -95,7 +95,20 @@ impl Store {
     ///
     /// Returns an error if reading the file fails or the file is not a valid plan.
     pub fn load_plan(&self, date: &PlanDate) -> Result<Option<Plan>, StoreError> {
-        self.load_plan_unlocked(date)
+        self.load_plan_with_default(date, Lead::from_seconds_const(300))
+    }
+
+    /// Loads and validates the plan for a date with a specified default notification lead.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if reading the file fails or the file is not a valid plan.
+    pub fn load_plan_with_default(
+        &self,
+        date: &PlanDate,
+        default_lead: Lead,
+    ) -> Result<Option<Plan>, StoreError> {
+        self.load_plan_unlocked_with_default(date, default_lead)
     }
 
     /// Merges and persists a plan using the terminal-history policy.
@@ -105,8 +118,23 @@ impl Store {
     /// Returns an error if the store is locked, the incoming/existing plan is invalid, or terminal
     /// history would be altered without `HistoryPolicy::Override`.
     pub fn set_plan(&self, incoming: &Plan, policy: HistoryPolicy) -> Result<Plan, StoreError> {
+        self.set_plan_with_default(incoming, policy, Lead::from_seconds_const(300))
+    }
+
+    /// Merges and persists a plan using the terminal-history policy and a specified default notification lead.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the store is locked, the incoming/existing plan is invalid, or terminal
+    /// history would be altered without `HistoryPolicy::Override`.
+    pub fn set_plan_with_default(
+        &self,
+        incoming: &Plan,
+        policy: HistoryPolicy,
+        default_lead: Lead,
+    ) -> Result<Plan, StoreError> {
         let _lock = self.try_lock()?;
-        let merged = self.merge_plan(incoming, policy)?;
+        let merged = self.merge_plan_with_default(incoming, policy, default_lead)?;
         self.write_plan_unlocked(&merged)?;
         Ok(merged)
     }
@@ -211,24 +239,32 @@ impl Store {
         }
         Ok(removed)
     }
-
-    fn load_plan_unlocked(&self, date: &PlanDate) -> Result<Option<Plan>, StoreError> {
+    fn load_plan_unlocked_with_default(
+        &self,
+        date: &PlanDate,
+        default_lead: Lead,
+    ) -> Result<Option<Plan>, StoreError> {
         let path = self.plan_path(date);
         let input = match fs::read_to_string(&path) {
             Ok(input) => input,
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
             Err(source) => return Err(io_error(path, source)),
         };
-        Ok(Some(Plan::from_toml(&input)?))
+        Ok(Some(Plan::from_toml_with_default(&input, default_lead)?))
     }
-
-    fn merge_plan(&self, incoming: &Plan, policy: HistoryPolicy) -> Result<Plan, StoreError> {
+    fn merge_plan_with_default(
+        &self,
+        incoming: &Plan,
+        policy: HistoryPolicy,
+        default_lead: Lead,
+    ) -> Result<Plan, StoreError> {
         incoming.validate().map_err(PlanError::from)?;
         if policy == HistoryPolicy::Override {
             return Ok(incoming.clone());
         }
 
-        let Some(existing) = self.load_plan_unlocked(&incoming.date)? else {
+        let Some(existing) = self.load_plan_unlocked_with_default(&incoming.date, default_lead)?
+        else {
             return Ok(incoming.clone());
         };
         let terminal_blocks: Vec<_> = existing

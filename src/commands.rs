@@ -2,6 +2,7 @@
 
 use std::{
     collections::{BTreeMap, HashMap},
+    fmt::Write as _,
     fs::{self, OpenOptions},
     io::{Read, Write},
     path::Path,
@@ -15,11 +16,13 @@ use crate::{
         AddArgs, AgendaArgs, ApplyArgs, ClearArgs, Commands, EditArgs, FireArgs, ReadArgs, SetArgs,
         Shell,
     },
+    config::AutomationConfig,
     context::{ContextRefs, Notification, Scheduler},
     error::{Error, Result},
     lifecycle::{Event, FireDecision, decide_fire, reconcile_overdue},
     model::{
-        Block, BlockId, ClockTime, DurationSpec, Plan, PlanDate, Run, Span, Status, TimeZoneName,
+        Block, BlockId, ClockTime, DurationSpec, Lead, Plan, PlanDate, Run, Span, Status,
+        TimeZoneName,
     },
     store::{FiredEventKey, FiredStatus, HistoryPolicy, Store, TriggerRecord},
     time::{resolve_block_end, resolve_block_start},
@@ -44,7 +47,7 @@ pub fn dispatch(
         Some(Commands::Next(args)) => next(args, out, context),
         Some(Commands::Agenda(args)) => agenda(args, out, context),
         Some(Commands::Apply(args)) => apply(args, out, context),
-        Some(Commands::Fire(args)) => fire(&args, context),
+        Some(Commands::Fire(args)) => fire(&args, out, context),
         Some(Commands::Status) => status(out, context),
         Some(Commands::Doctor) => doctor(out, context),
         Some(Commands::Completions(args)) => completions(args.shell, out),
@@ -53,7 +56,7 @@ pub fn dispatch(
 
 fn set(args: SetArgs, out: &mut dyn Write, context: &ContextRefs<'_>) -> Result<()> {
     let input = read_plan_input(&args.from)?;
-    let mut plan = Plan::from_toml(&input)?;
+    let mut plan = Plan::from_toml_with_default(&input, context.config.notify.default_lead)?;
     if let Some(date) = args.date {
         plan.date = date;
     }
@@ -62,7 +65,10 @@ fn set(args: SetArgs, out: &mut dyn Write, context: &ContextRefs<'_>) -> Result<
     } else {
         HistoryPolicy::Preserve
     };
-    let stored = context.store.set_plan(&plan, policy)?;
+    let stored =
+        context
+            .store
+            .set_plan_with_default(&plan, policy, context.config.notify.default_lead)?;
     writeln!(out, "stored {}", stored.date)?;
     Ok(())
 }
@@ -79,7 +85,7 @@ fn add(args: AddArgs, context: &ContextRefs<'_>) -> Result<()> {
         title: args.title,
         start: args.start,
         span: span_from(args.end, args.duration)?,
-        notify: args.notify.unwrap_or_default(),
+        notify: args.notify.unwrap_or(context.config.notify.default_lead),
         tags: args.tags,
         status: Status::Pending,
         run: run_from(args.run)?,
@@ -89,14 +95,25 @@ fn add(args: AddArgs, context: &ContextRefs<'_>) -> Result<()> {
         Some(index) if plan.blocks[index].status.is_terminal() => {
             Err(Error::HistoryConflict { id })
         }
-        Some(index) => replace_block(context.store, &mut plan, index, block),
-        None => insert_block(context.store, &mut plan, block),
+        Some(index) => replace_block(
+            context.store,
+            &mut plan,
+            index,
+            block,
+            context.config.notify.default_lead,
+        ),
+        None => insert_block(
+            context.store,
+            &mut plan,
+            block,
+            context.config.notify.default_lead,
+        ),
     }
 }
 
 fn edit(args: EditArgs, context: &ContextRefs<'_>) -> Result<()> {
     let date = args.date.unwrap_or_else(|| today(context));
-    let mut plan = load_required(context.store, &date)?;
+    let mut plan = load_required(context.store, &date, context.config.notify.default_lead)?;
     let block = find_block_mut(&mut plan, &args.id)?;
     ensure_non_terminal(block)?;
 
@@ -124,13 +141,13 @@ fn edit(args: EditArgs, context: &ContextRefs<'_>) -> Result<()> {
         block.run = Some(Run::new(args.run)?);
     }
 
-    context.store.set_plan(&plan, HistoryPolicy::Preserve)?;
+    persist_plan(context, &plan)?;
     Ok(())
 }
 
 fn remove(id: &BlockId, context: &ContextRefs<'_>) -> Result<()> {
     let date = today(context);
-    let mut plan = load_required(context.store, &date)?;
+    let mut plan = load_required(context.store, &date, context.config.notify.default_lead)?;
     let index = plan
         .blocks
         .iter()
@@ -138,19 +155,19 @@ fn remove(id: &BlockId, context: &ContextRefs<'_>) -> Result<()> {
         .ok_or_else(|| Error::NotFound(format!("block `{id}`")))?;
     ensure_non_terminal(&plan.blocks[index])?;
     plan.blocks.remove(index);
-    context.store.set_plan(&plan, HistoryPolicy::Preserve)?;
+    persist_plan(context, &plan)?;
     Ok(())
 }
 
 fn set_status(id: BlockId, status: Status, context: &ContextRefs<'_>) -> Result<()> {
     let date = today(context);
-    let mut plan = load_required(context.store, &date)?;
+    let mut plan = load_required(context.store, &date, context.config.notify.default_lead)?;
     let block = find_block_mut(&mut plan, &id)?;
     if block.status.is_terminal() && block.status != status {
         return Err(Error::HistoryConflict { id });
     }
     block.status = status;
-    context.store.set_plan(&plan, HistoryPolicy::Preserve)?;
+    persist_plan(context, &plan)?;
     Ok(())
 }
 
@@ -174,7 +191,7 @@ fn clear(args: ClearArgs, out: &mut dyn Write, context: &ContextRefs<'_>) -> Res
 
 fn show(args: ReadArgs, out: &mut dyn Write, context: &ContextRefs<'_>) -> Result<()> {
     let date = args.date.unwrap_or_else(|| today(context));
-    let plan = load_required(context.store, &date)?;
+    let plan = load_required(context.store, &date, context.config.notify.default_lead)?;
     if args.json {
         serde_json::to_writer_pretty(&mut *out, &plan)?;
         writeln!(out)?;
@@ -262,9 +279,12 @@ fn apply(args: ApplyArgs, out: &mut dyn Write, context: &ContextRefs<'_>) -> Res
     write_reconcile_summary(out, &changes)
 }
 
-fn fire(args: &FireArgs, context: &ContextRefs<'_>) -> Result<()> {
+fn fire(args: &FireArgs, out: &mut dyn Write, context: &ContextRefs<'_>) -> Result<()> {
     let _cleanup = FireCleanup;
-    let Some(mut plan) = context.store.load_plan(&args.date)? else {
+    let Some(mut plan) = context
+        .store
+        .load_plan_with_default(&args.date, context.config.notify.default_lead)?
+    else {
         return Ok(());
     };
     let Some(index) = plan.blocks.iter().position(|block| block.id == args.id) else {
@@ -293,19 +313,36 @@ fn fire(args: &FireArgs, context: &ContextRefs<'_>) -> Result<()> {
         context.policy,
     );
     let mut log_line = format!("{} {} {}", args.date, args.id, args.event);
-    match decision {
-        FireDecision::NoOp => log_line.push_str(" no-op"),
-        FireDecision::Notify => log_notify(context, &plan.blocks[index], &mut log_line),
-        FireDecision::Activate { notify, run } => {
-            activate_block(context, &mut plan, index, notify, run, &mut log_line)?;
+
+    // We run the match and if it errors, we STILL want to write the log line if we constructed one
+    // (especially if it was refused, where check_plan_file_security logs the refusal inside activate_block).
+    let result = match decision {
+        FireDecision::NoOp => {
+            log_line.push_str(" no-op");
+            Ok(())
         }
-        FireDecision::MarkMissed => mark_missed(context.store, &mut plan, index, &mut log_line)?,
+        FireDecision::Notify => {
+            log_notify(context, &plan.blocks[index], &mut log_line);
+            Ok(())
+        }
+        FireDecision::Activate { notify, run } => activate_block(
+            context,
+            &mut plan,
+            index,
+            notify,
+            run,
+            args.dry_run,
+            out,
+            &mut log_line,
+        ),
+        FireDecision::MarkMissed => mark_missed(context.store, &mut plan, index, &mut log_line),
         FireDecision::Close { status } => {
-            close_block(context.store, &mut plan, index, status, &mut log_line)?;
+            close_block(context.store, &mut plan, index, status, &mut log_line)
         }
-    }
+    };
+
     append_fire_log(context.store, &log_line)?;
-    Ok(())
+    result
 }
 
 struct FireCleanup;
@@ -347,7 +384,7 @@ fn read_plan_input(source: &str) -> Result<String> {
 }
 
 fn load_or_new_plan(store: &Store, date: &PlanDate, context: &ContextRefs<'_>) -> Result<Plan> {
-    if let Some(plan) = store.load_plan(date)? {
+    if let Some(plan) = store.load_plan_with_default(date, context.config.notify.default_lead)? {
         return Ok(plan);
     }
     let timezone = timezone_from_clock(context)?;
@@ -362,26 +399,49 @@ fn empty_plan(date: PlanDate, timezone: TimeZoneName) -> Plan {
     }
 }
 
-fn replace_block(store: &Store, plan: &mut Plan, index: usize, block: Block) -> Result<()> {
+fn replace_block(
+    store: &Store,
+    plan: &mut Plan,
+    index: usize,
+    block: Block,
+    default_lead: Lead,
+) -> Result<()> {
     plan.blocks[index] = block;
-    store.set_plan(plan, HistoryPolicy::Preserve)?;
+    store.set_plan_with_default(plan, HistoryPolicy::Preserve, default_lead)?;
     Ok(())
 }
 
-fn insert_block(store: &Store, plan: &mut Plan, block: Block) -> Result<()> {
+fn insert_block(store: &Store, plan: &mut Plan, block: Block, default_lead: Lead) -> Result<()> {
     plan.blocks.push(block);
-    store.set_plan(plan, HistoryPolicy::Preserve)?;
+    store.set_plan_with_default(plan, HistoryPolicy::Preserve, default_lead)?;
     Ok(())
 }
 
-fn load_required(store: &Store, date: &PlanDate) -> Result<Plan> {
+fn load_required(store: &Store, date: &PlanDate, default_lead: Lead) -> Result<Plan> {
     store
-        .load_plan(date)?
+        .load_plan_with_default(date, default_lead)?
         .ok_or_else(|| Error::NotFound(format!("plan for {date}")))
 }
 
+/// Persists `plan` under the preserve-history policy with the configured default notify lead.
+///
+/// Centralizes the default-lead wiring and keeps the long `set_plan_with_default` call out of the
+/// callers (where rustfmt would wrap it so the `?` lands alone on a line and reads as an uncovered
+/// error branch).
+fn persist_plan(context: &ContextRefs<'_>, plan: &Plan) -> Result<()> {
+    context
+        .store
+        .set_plan_with_default(
+            plan,
+            HistoryPolicy::Preserve,
+            context.config.notify.default_lead,
+        )
+        .map(|_| ())
+        .map_err(Error::from)
+}
+
 fn reconciled_plan(context: &ContextRefs<'_>, date: &PlanDate) -> Result<Plan> {
-    let mut plan = load_required(context.store, date)?;
+    let mut plan = load_required(context.store, date, context.config.notify.default_lead)?;
     let now = context.clock.now().timestamp();
     let updates = reconcile_overdue(&plan, now, context.policy.grace())?;
     if updates.is_empty() {
@@ -397,7 +457,7 @@ fn reconciled_plan(context: &ContextRefs<'_>, date: &PlanDate) -> Result<Plan> {
             block.status = *status;
         }
     }
-    context.store.set_plan(&plan, HistoryPolicy::Preserve)?;
+    persist_plan(context, &plan)?;
     Ok(plan)
 }
 
@@ -414,11 +474,11 @@ fn desired_triggers(plan: &Plan, now: Timestamp) -> Result<Vec<TriggerRecord>> {
             .checked_sub(lead)
             .map_err(crate::time::TimeError::from)?;
         let end = resolve_block_end(plan, block)?;
-        for (event, scheduled_at) in [
-            (Event::Notify, notify_at),
-            (Event::Start, start),
-            (Event::End, end),
-        ] {
+        let mut events = vec![(Event::Start, start), (Event::End, end)];
+        if notify_at < start {
+            events.push((Event::Notify, notify_at));
+        }
+        for (event, scheduled_at) in events {
             if scheduled_at > now {
                 triggers.push(TriggerRecord {
                     backend_id: backend_id_for(&plan.date, &block.id, event, &rev, scheduled_at),
@@ -548,12 +608,85 @@ fn notification_for(block: &Block) -> Notification {
     }
 }
 
+#[cfg(unix)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn check_plan_file_security(path: &Path) -> Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    let metadata = std::fs::metadata(path)?;
+    let mode = metadata.mode();
+    if mode & 0o022 != 0 {
+        return Err(Error::AutomationRefused(format!(
+            "plan file is group- or world-writable (mode: {mode:o})"
+        )));
+    }
+    let output = std::process::Command::new("id").arg("-u").output();
+    let uid = match output {
+        Ok(out) if out.status.success() => {
+            let s = String::from_utf8_lossy(&out.stdout);
+            s.trim().parse::<u32>().unwrap_or(u32::MAX)
+        }
+        _ => {
+            return Err(Error::AutomationRefused(
+                "failed to determine current user UID".to_string(),
+            ));
+        }
+    };
+    if metadata.uid() != uid {
+        return Err(Error::AutomationRefused(format!(
+            "plan file is not owned by the current user (file uid: {}, current uid: {})",
+            metadata.uid(),
+            uid
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn check_plan_file_security(_path: &Path) -> Result<()> {
+    Ok(())
+}
+
+/// Decides whether a block's `run:` argv is permitted by automation policy.
+///
+/// Pure (no IO) so the whole policy matrix is unit-testable; the `Err` string is the user-facing
+/// refusal reason surfaced as exit code 5 (`Error::AutomationRefused`), per DESIGN §9.
+fn authorize_run(
+    automation: &AutomationConfig,
+    argv: &[String],
+) -> std::result::Result<(), String> {
+    if !automation.enabled {
+        return Err("automation is disabled".to_owned());
+    }
+    let Some(program) = argv.first() else {
+        return Err("empty run command argv".to_owned());
+    };
+    if !Path::new(program).is_absolute() {
+        return Err(format!("executable path is not absolute: {program}"));
+    }
+    if !automation
+        .allowed_executables
+        .contains(&std::path::PathBuf::from(program))
+    {
+        return Err(format!("executable not in allowlist: {program}"));
+    }
+    Ok(())
+}
+
+/// Marks a block active (notifying), runs its `run:` automation if present, then persists.
+///
+/// Automation is validated and run against the plan file *as loaded* before the activation write,
+/// so our own write can't change the perms/ownership the security probe inspects. A refused/failed
+/// run is still persisted as `active` (DESIGN §11) and surfaced as the exit code. Policy decisions
+/// are pure (`authorize_run`); only the file-security probe and process spawn are IO.
+#[allow(clippy::too_many_arguments)]
 fn activate_block(
     context: &ContextRefs<'_>,
     plan: &mut Plan,
     index: usize,
     do_notify: bool,
     run: bool,
+    dry_run: bool,
+    out: &mut dyn Write,
     log_line: &mut String,
 ) -> Result<()> {
     plan.blocks[index].status = Status::Active;
@@ -564,13 +697,169 @@ fn activate_block(
             log_line,
         );
     }
-    if run {
-        log_line.push_str(" activated run-deferred");
+
+    // Validate + run automation against the plan file *as loaded*, before persisting our own
+    // activation write (which would otherwise replace the file's perms/ownership under the
+    // security probe). A refusal is still persisted as `active` (DESIGN §11: the block follows
+    // its lifecycle regardless of run outcome), then surfaced as the exit code.
+    let mut deferred: Option<Error> = None;
+    match if run {
+        plan.blocks[index].run.clone()
     } else {
-        log_line.push_str(" activated");
+        None
+    } {
+        None => log_line.push_str(" activated"),
+        Some(run_obj) => {
+            let argv = run_obj.as_slice();
+            if let Err(reason) = authorize_run(&context.config.automation, argv) {
+                let _ = write!(log_line, " run-refused: {reason}");
+                deferred = Some(Error::AutomationRefused(reason));
+            } else if let Err(error) =
+                check_plan_file_security(&context.store.plan_path(&plan.date))
+            {
+                let _ = write!(log_line, " run-refused: {error}");
+                deferred = Some(error);
+            } else if dry_run {
+                writeln!(out, "dry-run: would run command: {argv:?}")?;
+                let _ = write!(log_line, " activated run (dry-run): argv={argv:?}");
+            } else {
+                let report = execute_run(argv, context.config.automation.timeout);
+                let _ = write!(
+                    log_line,
+                    " activated run: argv={:?} outcome={} stdout={:?} stderr={:?} rev={} at={}",
+                    argv,
+                    report.outcome,
+                    report.stdout,
+                    report.stderr,
+                    plan.blocks[index].schedule_rev(),
+                    context.clock.now().timestamp()
+                );
+            }
+        }
     }
-    context.store.set_plan(plan, HistoryPolicy::Preserve)?;
-    Ok(())
+
+    persist_plan(context, plan)?;
+
+    match deferred {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
+}
+
+/// Outcome of a finished (or timed-out) `run:` command, with capped stdout/stderr tails.
+struct RunReport {
+    outcome: String,
+    stdout: String,
+    stderr: String,
+}
+
+/// Keeps only the most recent `cap` bytes of a tail buffer. Pure, so the truncation rule is tested.
+fn cap_tail(buf: &mut Vec<u8>, cap: usize) {
+    if buf.len() > cap {
+        let drain = buf.len() - cap;
+        buf.drain(0..drain);
+    }
+}
+
+/// Renders a captured output tail as a single safe log token. Pure (tested).
+fn tail_string(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes)
+        .trim()
+        .replace('\n', "\\n")
+        .replace('\r', "")
+}
+
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn drain_into(reader: &mut impl Read, buf: &std::sync::Mutex<Vec<u8>>, cap: usize) {
+    let mut chunk = [0u8; 1024];
+    while let Ok(read) = reader.read(&mut chunk) {
+        if read == 0 {
+            break;
+        }
+        let mut guard = buf.lock().expect("tail buffer lock is not poisoned");
+        guard.extend_from_slice(&chunk[..read]);
+        cap_tail(&mut guard, cap);
+    }
+}
+
+/// Runs an allow-listed argv with no shell, capturing capped output tails and enforcing a timeout.
+///
+/// This is the genuine process-IO boundary (spawn, reader threads, kill/reap) — excluded from
+/// coverage; its pure helpers (`authorize_run`, `cap_tail`, `tail_string`) are tested separately.
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn execute_run(argv: &[String], timeout: DurationSpec) -> RunReport {
+    use std::sync::{Arc, Mutex};
+    const TAIL_CAP: usize = 4096;
+
+    let mut child = match std::process::Command::new(&argv[0])
+        .args(&argv[1..])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(error) => {
+            return RunReport {
+                outcome: format!("failed-to-spawn:{error}"),
+                stdout: String::new(),
+                stderr: String::new(),
+            };
+        }
+    };
+
+    let stdout_buf = Arc::new(Mutex::new(Vec::new()));
+    let stderr_buf = Arc::new(Mutex::new(Vec::new()));
+    let mut child_stdout = child.stdout.take().expect("stdout was piped");
+    let mut child_stderr = child.stderr.take().expect("stderr was piped");
+    let stdout_reader = {
+        let buf = Arc::clone(&stdout_buf);
+        std::thread::spawn(move || drain_into(&mut child_stdout, &buf, TAIL_CAP))
+    };
+    let stderr_reader = {
+        let buf = Arc::clone(&stderr_buf);
+        std::thread::spawn(move || drain_into(&mut child_stderr, &buf, TAIL_CAP))
+    };
+
+    let deadline = std::time::Duration::from_secs(u64::from(timeout.as_seconds()));
+    let start = std::time::Instant::now();
+    let outcome = loop {
+        match child.try_wait() {
+            Ok(Some(status)) if status.success() => break "success".to_owned(),
+            Ok(Some(status)) => match status.code() {
+                Some(code) => break format!("failed:exit={code}"),
+                None => break "failed:signal".to_owned(),
+            },
+            Ok(None) => {
+                if start.elapsed() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    break "timeout".to_owned();
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            Err(error) => {
+                let _ = child.wait();
+                break format!("error:{error}");
+            }
+        }
+    };
+
+    // Join the readers so the captured tails are complete before we read them.
+    let _ = stdout_reader.join();
+    let _ = stderr_reader.join();
+    RunReport {
+        outcome,
+        stdout: tail_string(
+            &stdout_buf
+                .lock()
+                .expect("stdout buffer lock is not poisoned"),
+        ),
+        stderr: tail_string(
+            &stderr_buf
+                .lock()
+                .expect("stderr buffer lock is not poisoned"),
+        ),
+    }
 }
 
 fn mark_block(
@@ -755,5 +1044,77 @@ impl AgendaEntry {
             block: BlockSummary::from_block(block),
             starts_in_seconds,
         }
+    }
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod automation_policy_tests {
+    use super::{authorize_run, cap_tail, tail_string};
+    use crate::config::AutomationConfig;
+    use std::path::PathBuf;
+
+    fn enabled_with(allow: &[&str]) -> AutomationConfig {
+        AutomationConfig {
+            enabled: true,
+            allowed_executables: allow.iter().map(|s| PathBuf::from(*s)).collect(),
+            ..AutomationConfig::default()
+        }
+    }
+
+    #[test]
+    fn authorize_run_allows_absolute_allowlisted_program() {
+        let config = enabled_with(&["/bin/echo"]);
+        assert!(authorize_run(&config, &["/bin/echo".to_owned(), "hi".to_owned()]).is_ok());
+    }
+
+    #[test]
+    fn authorize_run_refuses_when_disabled() {
+        assert_eq!(
+            authorize_run(&AutomationConfig::default(), &["/bin/echo".to_owned()]),
+            Err("automation is disabled".to_owned())
+        );
+    }
+
+    #[test]
+    fn authorize_run_refuses_empty_argv() {
+        assert!(
+            authorize_run(&enabled_with(&[]), &[])
+                .unwrap_err()
+                .contains("empty run command argv")
+        );
+    }
+
+    #[test]
+    fn authorize_run_refuses_relative_program() {
+        assert!(
+            authorize_run(&enabled_with(&["echo"]), &["echo".to_owned()])
+                .unwrap_err()
+                .contains("executable path is not absolute")
+        );
+    }
+
+    #[test]
+    fn authorize_run_refuses_unlisted_program() {
+        assert!(
+            authorize_run(&enabled_with(&["/bin/true"]), &["/bin/echo".to_owned()])
+                .unwrap_err()
+                .contains("executable not in allowlist")
+        );
+    }
+
+    #[test]
+    fn cap_tail_keeps_only_most_recent_bytes() {
+        let mut buf = b"0123456789".to_vec();
+        cap_tail(&mut buf, 4);
+        assert_eq!(buf, b"6789");
+        let mut small = b"ab".to_vec();
+        cap_tail(&mut small, 4);
+        assert_eq!(small, b"ab");
+    }
+
+    #[test]
+    fn tail_string_trims_and_escapes_newlines() {
+        assert_eq!(tail_string(b"  a\nb\r\n  "), "a\\nb");
     }
 }

@@ -220,6 +220,7 @@ mod tests {
         trigger_identity, write_doctor,
     };
     use crate::{
+        config::Config,
         context::{Context, RecordingNotifier, RecordingScheduler},
         lifecycle::Event,
         model::{
@@ -371,6 +372,7 @@ mod tests {
             clock,
             RecordingScheduler::default(),
             RecordingNotifier::default(),
+            Config::default(),
         );
         (temp, context)
     }

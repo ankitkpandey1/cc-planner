@@ -28,10 +28,35 @@ impl Plan {
     /// Returns an exit-code-2 `PlanError` if TOML parsing fails or the plan violates schema
     /// invariants.
     pub fn from_toml(input: &str) -> Result<Self, PlanError> {
+        Self::from_toml_with_default(input, Lead::from_seconds_const(300))
+    }
+
+    /// Parses a TOML plan with a specified default notification lead.
+    ///
+    /// # Errors
+    ///
+    /// Returns an exit-code-2 `PlanError` if TOML parsing fails or the plan violates schema
+    /// invariants.
+    pub fn from_toml_with_default(input: &str, default_lead: Lead) -> Result<Self, PlanError> {
         let raw = toml::from_str::<RawPlan>(input)?;
-        let plan = Self::try_from(raw)?;
+        let plan = Self::from_raw(raw, default_lead)?;
         plan.validate()?;
         Ok(plan)
+    }
+
+    /// Converts raw deserialized plan into a domain plan using a default notify lead.
+    fn from_raw(raw: RawPlan, default_lead: Lead) -> Result<Self, ValidationError> {
+        let blocks = raw
+            .blocks
+            .into_iter()
+            .map(|raw_block| Block::from_raw(raw_block, default_lead))
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(Self {
+            date: raw.date,
+            timezone: raw.timezone,
+            blocks,
+        })
     }
 
     /// Serializes a validated plan to TOML.
@@ -97,17 +122,7 @@ impl TryFrom<RawPlan> for Plan {
     type Error = ValidationError;
 
     fn try_from(raw: RawPlan) -> Result<Self, Self::Error> {
-        let blocks = raw
-            .blocks
-            .into_iter()
-            .map(Block::try_from)
-            .collect::<Result<Vec<_>, _>>()?;
-
-        Ok(Self {
-            date: raw.date,
-            timezone: raw.timezone,
-            blocks,
-        })
+        Self::from_raw(raw, Lead::from_seconds_const(300))
     }
 }
 
@@ -215,6 +230,13 @@ impl TryFrom<RawBlock> for Block {
     type Error = ValidationError;
 
     fn try_from(raw: RawBlock) -> Result<Self, Self::Error> {
+        Self::from_raw(raw, Lead::from_seconds_const(300))
+    }
+}
+
+impl Block {
+    /// Converts a `RawBlock` to a Block, using the provided default lead if notify was omitted.
+    fn from_raw(raw: RawBlock, default_lead: Lead) -> Result<Self, ValidationError> {
         let span = match (raw.end, raw.duration) {
             (Some(_), Some(_)) => {
                 return Err(ValidationError::BothEndAndDuration { id: raw.id });
@@ -236,7 +258,7 @@ impl TryFrom<RawBlock> for Block {
             title: raw.title,
             start: raw.start,
             span,
-            notify: raw.notify,
+            notify: raw.notify.unwrap_or(default_lead),
             tags: raw.tags,
             status: raw.status,
             run,
@@ -293,8 +315,8 @@ struct RawBlock {
     end: Option<ClockTime>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     duration: Option<DurationSpec>,
-    #[serde(default)]
-    notify: Lead,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    notify: Option<Lead>,
     #[serde(default)]
     tags: Vec<String>,
     #[serde(default)]
@@ -316,7 +338,7 @@ impl From<&Block> for RawBlock {
             start: block.start,
             end,
             duration,
-            notify: block.notify,
+            notify: Some(block.notify),
             tags: block.tags.clone(),
             status: block.status,
             run: block.run.as_ref().map(|argv| argv.as_slice().to_vec()),
@@ -648,6 +670,16 @@ impl DurationSpec {
         Ok(Self { seconds })
     }
 
+    /// Const constructor for compile-time config defaults. Returns `None` for invalid values.
+    #[must_use]
+    pub const fn from_seconds_const(seconds: u32) -> Option<Self> {
+        if seconds == 0 || seconds > SECONDS_PER_DAY {
+            None
+        } else {
+            Some(Self { seconds })
+        }
+    }
+
     #[must_use]
     pub const fn as_seconds(self) -> u32 {
         self.seconds
@@ -707,6 +739,12 @@ impl Lead {
         }
 
         Ok(Self { seconds })
+    }
+
+    /// Const constructor for compile-time config defaults.
+    #[must_use]
+    pub const fn from_seconds_const(seconds: u32) -> Self {
+        Self { seconds }
     }
 
     #[must_use]
@@ -910,7 +948,7 @@ pub enum FieldParseError {
 
 #[cfg(test)]
 mod timezone_name_tests {
-    use super::{FieldParseError, TimeZoneName};
+    use super::*;
 
     #[test]
     fn time_zone_lookup_reports_invalid_private_name() {
@@ -920,5 +958,39 @@ mod timezone_name_tests {
             timezone.to_time_zone(),
             Err(FieldParseError::TimeZone { value }) if value == "Not/AZone"
         ));
+    }
+
+    #[test]
+    fn test_raw_try_from_and_const_constructors() {
+        assert_eq!(Lead::from_seconds_const(300).as_seconds(), 300);
+
+        assert_eq!(
+            DurationSpec::from_seconds_const(1800).unwrap().as_seconds(),
+            1800
+        );
+        assert!(DurationSpec::from_seconds_const(0).is_none());
+        assert!(DurationSpec::from_seconds_const(86401).is_none());
+
+        let raw_block = RawBlock {
+            id: BlockId::new("focus-1").unwrap(),
+            title: "Focus time".to_owned(),
+            start: "11:00".parse().unwrap(),
+            end: Some("11:30".parse().unwrap()),
+            duration: None,
+            notify: None,
+            tags: vec![],
+            status: Status::Pending,
+            run: None,
+        };
+        let block = Block::try_from(raw_block.clone()).unwrap();
+        assert_eq!(block.id.as_str(), "focus-1");
+
+        let raw_plan = RawPlan {
+            date: "2026-06-08".parse().unwrap(),
+            timezone: "Asia/Kolkata".parse().unwrap(),
+            blocks: vec![raw_block],
+        };
+        let plan = Plan::try_from(raw_plan).unwrap();
+        assert_eq!(plan.blocks.len(), 1);
     }
 }

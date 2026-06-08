@@ -1,6 +1,7 @@
 use assert_fs::TempDir;
 use ccplan::{
     cli::Cli,
+    config::Config,
     context::{Context, RecordingNotifier, RecordingScheduler},
     model::{
         Block, BlockId, ClockTime, DurationSpec, Lead, Plan, PlanDate, Span, Status, TimeZoneName,
@@ -23,6 +24,7 @@ proptest! {
             FixedClock::new("2026-06-08T10:00:00+05:30[Asia/Kolkata]".parse::<Zoned>().unwrap()),
             RecordingScheduler::default(),
             RecordingNotifier::default(),
+            Config::default(),
         );
         let plan = Plan {
             date: "2026-06-08".parse::<PlanDate>().unwrap(),

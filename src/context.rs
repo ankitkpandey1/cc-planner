@@ -6,6 +6,7 @@ use std::{cell::RefCell, collections::BTreeMap};
 use thiserror::Error;
 
 use crate::{
+    config::Config,
     lifecycle::{EndBehavior, LifecyclePolicy},
     store::{Store, TriggerRecord},
     time::Clock,
@@ -18,17 +19,20 @@ pub struct Context<C, S, N> {
     pub scheduler: S,
     pub notifier: N,
     pub policy: LifecyclePolicy,
+    pub config: Config,
 }
 
 impl<C, S, N> Context<C, S, N> {
     #[must_use]
-    pub fn new(store: Store, clock: C, scheduler: S, notifier: N) -> Self {
+    pub fn new(store: Store, clock: C, scheduler: S, notifier: N, config: Config) -> Self {
+        let grace = jiff::SignedDuration::from_secs(i64::from(config.grace.as_seconds()));
         Self {
             store,
             clock,
             scheduler,
             notifier,
-            policy: LifecyclePolicy::new(jiff::SignedDuration::from_secs(90), EndBehavior::Expire),
+            policy: LifecyclePolicy::new(grace, EndBehavior::Expire),
+            config,
         }
     }
 }
@@ -39,6 +43,7 @@ pub struct ContextRefs<'a> {
     pub scheduler: &'a dyn Scheduler,
     pub notifier: &'a dyn Notifier,
     pub policy: LifecyclePolicy,
+    pub config: &'a Config,
 }
 
 impl<C, S, N> Context<C, S, N>
@@ -55,6 +60,7 @@ where
             scheduler: &self.scheduler,
             notifier: &self.notifier,
             policy: self.policy,
+            config: &self.config,
         }
     }
 }

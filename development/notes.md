@@ -223,6 +223,23 @@ Tooling (installed in CI, not deps): `cargo-llvm-cov`, `cargo-deny`, `cargo-dist
 > Format: `### YYYY-MM-DD — <stage/topic>` then bullets. Record decisions, surprises, dead-ends,
 > and anything a future session must know. This is the anti-amnesia log.
 
+### 2026-06-08 — Stage 6 Config model + run: execution & security policy
+- Stage 6 precondition: re-read notes/backlog/checklist plus DESIGN §9 and resolved P1 blockers.
+- Implemented the config model in `src/config.rs`. Added `Config` carrying `AutomationConfig` and `NotifyConfig`, deserialized using TOML with `deny_unknown_fields` and default-fallback behavior.
+- Integrated `context.config.notify.default_lead` dynamically into `Plan::from_toml_with_default` and wired it into all CLI actions (`add`, `set`, `edit`, `remove`, `show`, `now`, `fire`, etc.), allowing customized notification leads that fallback to 5m.
+- Solved double-notification blocker (B-006) by ensuring `desired_triggers` skips scheduling `Event::Notify` if `notify_at >= start`.
+- Implemented strict safety policy checks in `fire` command execution:
+  - Opt-in: Refuse if automation is disabled (`config.automation.enabled == false`).
+  - Path absolute: Refuse if argv[0] is not an absolute path.
+  - Allowlist: Refuse if argv[0] is not on the allowed executables list.
+  - File permissions: Refuse if the plan file is group- or world-writable, or not owned by the current invoking user (using safe Unix process call `id -u` to determine UID and matching metadata uid).
+  - Return `Error::AutomationRefused` (exit code 5) and append structured `Start refused: <msg>` entry to `fire.log` on refusal.
+- Implemented subprocess command execution using `std::process::Command` without shell wrapper, enforcing config timeout via active `try_wait` monitoring loop and killing overruns.
+- Captured stdout/stderr tails safely using concurrent reader threads to avoid deadlocks.
+- Appended structured outcome entry (`outcome=success/failed exit_code:X/timeout`, captured stdout/stderr tail, start time, block rev) to `fire.log` and the trigger ledger.
+- Supported `--dry-run` to print the command detail to the writer instead of executing.
+- Wrote extensive tests for all safety checks (disabled, relative path, allowlist, plan file permissions, timeout, dry-run) and confirmed 100% test suite pass.
+
 ### 2026-06-08 — Stage 5 native scheduler + notifier backends
 - Stage 5 precondition: re-read notes/backlog/checklist plus DESIGN §6.1/§6.4/§7/§11 and re-ran the
   Stage 4/global gate before coding. Local recon confirmed the Linux dev box has a running
