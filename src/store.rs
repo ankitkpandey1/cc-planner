@@ -317,9 +317,17 @@ impl Drop for StoreLock {
 fn lock_file(file: File, lock_path: PathBuf) -> Result<StoreLock, StoreError> {
     match file.try_lock_exclusive() {
         Ok(()) => Ok(StoreLock { file }),
-        Err(error) if error.kind() == io::ErrorKind::WouldBlock => Err(StoreError::Locked),
+        Err(error) if is_lock_contention(&error) => Err(StoreError::Locked),
         Err(source) => Err(io_error(lock_path, source)),
     }
+}
+
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn is_lock_contention(error: &io::Error) -> bool {
+    matches!(
+        error.kind(),
+        io::ErrorKind::WouldBlock | io::ErrorKind::PermissionDenied
+    ) || matches!(error.raw_os_error(), Some(32 | 33))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
