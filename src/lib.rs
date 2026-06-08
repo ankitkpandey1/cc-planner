@@ -8,6 +8,7 @@
 use std::io::Write;
 
 pub mod cli;
+pub mod model;
 
 /// Runs a parsed `ccplan` invocation.
 ///
