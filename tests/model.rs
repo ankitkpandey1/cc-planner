@@ -1,6 +1,6 @@
 use ccplan::model::{
-    Block, BlockId, ClockTime, DurationSpec, Lead, Plan, PlanDate, PlanError, Run, Span, Status,
-    TimeZoneName, ValidationError,
+    Block, BlockId, ClockTime, DurationSpec, Lead, Plan, PlanDate, PlanError, Run, ScheduleRev,
+    Span, Status, TimeZoneName, ValidationError,
 };
 
 const PLAN_TOML: &str = r#"
@@ -98,6 +98,7 @@ fn field_parsers_reject_malformed_values() {
     assert!(DurationSpec::from_seconds(86_401).is_err());
     assert!(Lead::from_seconds(86_401).is_err());
     assert!(Run::new(Vec::new()).is_err());
+    assert!("not-a-rev".parse::<ScheduleRev>().is_err());
     assert!("".parse::<DurationSpec>().is_err());
     assert!("10".parse::<DurationSpec>().is_err());
     assert!("m".parse::<DurationSpec>().is_err());

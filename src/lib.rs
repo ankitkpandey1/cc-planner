@@ -5,44 +5,74 @@
 #![cfg_attr(coverage_nightly, allow(unused_features))]
 #![warn(clippy::pedantic)]
 
-use std::io::Write;
+use std::{io::Write, path::PathBuf};
 
 pub mod cli;
+mod commands;
+pub mod context;
+pub mod error;
 pub mod lifecycle;
 pub mod model;
 pub mod store;
 pub mod time;
 
+use context::{Context, UnavailableNotifier, UnavailableScheduler};
+use error::Result;
+use store::Store;
+use time::SystemClock;
+
 /// Runs a parsed `ccplan` invocation.
 ///
 /// # Errors
 ///
-/// Returns an error if writing to the provided output stream fails.
+/// Returns an error if command execution fails.
 #[allow(
     clippy::needless_pass_by_value,
     reason = "the parsed CLI is owned at the application boundary and will grow command payloads"
 )]
-pub fn run<W>(cli: cli::Cli, mut out: W) -> anyhow::Result<()>
+pub fn run<W>(cli: cli::Cli, mut out: W) -> Result<()>
 where
     W: Write,
 {
-    let cli::Cli {} = cli;
+    let context = Context::new(
+        runtime_store()?,
+        SystemClock,
+        UnavailableScheduler,
+        UnavailableNotifier,
+    );
+    run_with_context(cli, &mut out, &context)?;
+    Ok(())
+}
+
+/// Runs a parsed invocation against an injected context.
+///
+/// # Errors
+///
+/// Returns an error if command execution fails.
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "the parsed CLI is owned at the application boundary"
+)]
+pub fn run_with_context<C, S, N, W>(
+    cli: cli::Cli,
+    out: &mut W,
+    context: &Context<C, S, N>,
+) -> Result<()>
+where
+    C: time::Clock,
+    S: context::Scheduler,
+    N: context::Notifier,
+    W: Write,
+{
+    commands::dispatch(cli.command, out, &context.as_refs())?;
     out.flush()?;
     Ok(())
 }
 
-#[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
-mod tests {
-    use clap::Parser;
-
-    #[test]
-    fn run_accepts_minimal_cli() {
-        let cli = crate::cli::Cli::parse_from(["ccplan"]);
-        let mut output = Vec::new();
-
-        crate::run(cli, &mut output).expect("minimal invocation should run");
-
-        assert!(output.is_empty());
+fn runtime_store() -> Result<Store> {
+    if let Some(root) = std::env::var_os("CCPLAN_ROOT") {
+        return Ok(Store::new(&PathBuf::from(root)));
     }
+    Ok(Store::for_user()?)
 }

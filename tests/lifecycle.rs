@@ -26,6 +26,21 @@ fn fire_notify_on_time_sends_notification() {
 }
 
 #[test]
+fn event_parses_and_displays_cli_values() {
+    assert_eq!("notify".parse::<Event>().unwrap(), Event::Notify);
+    assert_eq!("start".parse::<Event>().unwrap(), Event::Start);
+    assert_eq!("end".parse::<Event>().unwrap(), Event::End);
+    assert_eq!(Event::Notify.to_string(), "notify");
+    assert!(
+        "bad"
+            .parse::<Event>()
+            .unwrap_err()
+            .to_string()
+            .contains("bad")
+    );
+}
+
+#[test]
 fn fire_notify_overdue_noops_without_status_change() {
     let block = block_with(Status::Pending, None);
 

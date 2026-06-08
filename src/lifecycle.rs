@@ -1,5 +1,7 @@
 //! Pure lifecycle/fire decision logic.
 
+use std::{fmt, str::FromStr};
+
 use jiff::{SignedDuration, Timestamp};
 use serde::{Deserialize, Serialize};
 
@@ -15,6 +17,44 @@ pub enum Event {
     Start,
     End,
 }
+
+impl fmt::Display for Event {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Notify => "notify",
+            Self::Start => "start",
+            Self::End => "end",
+        })
+    }
+}
+
+impl FromStr for Event {
+    type Err = EventParseError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "notify" => Ok(Self::Notify),
+            "start" => Ok(Self::Start),
+            "end" => Ok(Self::End),
+            _ => Err(EventParseError {
+                value: value.to_owned(),
+            }),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EventParseError {
+    value: String,
+}
+
+impl fmt::Display for EventParseError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "invalid event `{}`", self.value)
+    }
+}
+
+impl std::error::Error for EventParseError {}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EndBehavior {
@@ -35,6 +75,11 @@ impl LifecyclePolicy {
             grace,
             end_behavior,
         }
+    }
+
+    #[must_use]
+    pub const fn grace(self) -> SignedDuration {
+        self.grace
     }
 
     const fn close_status(self) -> Status {

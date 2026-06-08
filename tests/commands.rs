@@ -1,0 +1,929 @@
+use assert_fs::TempDir;
+use ccplan::{
+    cli::Cli,
+    context::{Context, RecordingNotifier, RecordingScheduler, SchedulerCall},
+    error::Error,
+    model::{
+        Block, BlockId, ClockTime, DurationSpec, Lead, Plan, PlanDate, Run, Span, Status,
+        TimeZoneName,
+    },
+    run_with_context,
+    store::{HistoryPolicy, Store},
+    time::FixedClock,
+};
+use clap::Parser;
+use jiff::{SignedDuration, Timestamp, Zoned};
+use serde_json::Value;
+
+#[test]
+fn no_command_is_a_successful_noop() {
+    let (_temp, context) = test_context_at("2026-06-08T10:00:00+05:30[Asia/Kolkata]");
+
+    let output = run_ok(&context, ["ccplan"]);
+
+    assert!(output.is_empty());
+}
+
+#[test]
+fn set_and_show_json_round_trip_with_fake_context() {
+    let (_temp, context) = test_context_at("2026-06-08T10:00:00+05:30[Asia/Kolkata]");
+    let input = context
+        .store
+        .plan_path(&date())
+        .with_file_name("incoming.toml");
+    std::fs::create_dir_all(input.parent().unwrap()).unwrap();
+    std::fs::write(&input, plan_toml()).unwrap();
+
+    run_ok(
+        &context,
+        ["ccplan", "set", "--from", input.to_str().unwrap()],
+    );
+
+    let output = run_ok(&context, ["ccplan", "show", "--json"]);
+    let json: Value = serde_json::from_slice(&output).unwrap();
+
+    assert_eq!(
+        json,
+        serde_json::json!({
+            "block": [
+                {
+                    "end": "11:30",
+                    "id": "focus",
+                    "notify": "5m",
+                    "start": "11:00",
+                    "status": "pending",
+                    "tags": ["deep-work"],
+                    "title": "Focus time",
+                },
+                {
+                    "duration": "30m",
+                    "id": "lunch",
+                    "notify": "0m",
+                    "start": "14:00",
+                    "status": "pending",
+                    "tags": [],
+                    "title": "Lunch",
+                },
+            ],
+            "date": "2026-06-08",
+            "timezone": "Asia/Kolkata",
+        })
+    );
+}
+
+#[test]
+fn set_date_override_and_override_history_replace_terminal_history() {
+    let (_temp, context) = test_context_at("2026-06-08T10:00:00+05:30[Asia/Kolkata]");
+    let input = context
+        .store
+        .plan_path(&date())
+        .with_file_name("incoming-override.toml");
+    std::fs::create_dir_all(input.parent().unwrap()).unwrap();
+    std::fs::write(&input, plan_toml()).unwrap();
+
+    run_ok(
+        &context,
+        [
+            "ccplan",
+            "set",
+            "--from",
+            input.to_str().unwrap(),
+            "--date",
+            "2026-06-09",
+        ],
+    );
+
+    assert!(context.store.load_plan(&date()).unwrap().is_none());
+    assert!(
+        context
+            .store
+            .load_plan(&"2026-06-09".parse().unwrap())
+            .unwrap()
+            .is_some()
+    );
+
+    let terminal = Plan {
+        date: date(),
+        timezone: "Asia/Kolkata".parse().unwrap(),
+        blocks: vec![{
+            let mut block = block_with(
+                "focus",
+                "Finished",
+                "10:00",
+                Span::Duration(DurationSpec::from_seconds(30 * 60).unwrap()),
+            );
+            block.status = Status::Done;
+            block
+        }],
+    };
+    context
+        .store
+        .set_plan(&terminal, HistoryPolicy::Override)
+        .unwrap();
+    run_ok(
+        &context,
+        [
+            "ccplan",
+            "set",
+            "--from",
+            input.to_str().unwrap(),
+            "--override-history",
+        ],
+    );
+
+    let stored = context.store.load_plan(&date()).unwrap().unwrap();
+    assert_eq!(stored.blocks[0].status, Status::Pending);
+}
+
+#[test]
+fn mutation_commands_update_only_non_terminal_blocks() {
+    let (_temp, context) = test_context_at("2026-06-08T10:00:00+05:30[Asia/Kolkata]");
+
+    run_ok(
+        &context,
+        [
+            "ccplan",
+            "add",
+            "--id",
+            "focus",
+            "--title",
+            "Focus",
+            "--start",
+            "11:00",
+            "--duration",
+            "30m",
+        ],
+    );
+    run_ok(
+        &context,
+        [
+            "ccplan",
+            "edit",
+            "focus",
+            "--title",
+            "Deep Focus",
+            "--start",
+            "11:15",
+        ],
+    );
+    run_ok(&context, ["ccplan", "done", "focus"]);
+
+    run_ok(
+        &context,
+        [
+            "ccplan",
+            "add",
+            "--id",
+            "break",
+            "--title",
+            "Break",
+            "--start",
+            "12:00",
+            "--duration",
+            "15m",
+        ],
+    );
+    run_ok(&context, ["ccplan", "skip", "break"]);
+
+    run_ok(
+        &context,
+        [
+            "ccplan",
+            "add",
+            "--id",
+            "tmp",
+            "--title",
+            "Temporary",
+            "--start",
+            "13:00",
+            "--duration",
+            "15m",
+        ],
+    );
+    run_ok(&context, ["ccplan", "rm", "tmp"]);
+
+    let plan = context.store.load_plan(&date()).unwrap().unwrap();
+
+    assert_eq!(plan.blocks.len(), 2);
+    assert_eq!(plan.blocks[0].id.as_str(), "focus");
+    assert_eq!(plan.blocks[0].title, "Deep Focus");
+    assert_eq!(plan.blocks[0].start.to_string(), "11:15");
+    assert_eq!(plan.blocks[0].status, Status::Done);
+    assert_eq!(plan.blocks[1].status, Status::Skipped);
+}
+
+#[test]
+fn add_edit_and_status_errors_cover_conflict_paths() {
+    let (_temp, context) = test_context_at("2026-06-08T10:00:00+05:30[Asia/Kolkata]");
+
+    run_ok(
+        &context,
+        [
+            "ccplan",
+            "add",
+            "--title",
+            "Deep Focus!",
+            "--start",
+            "11:00",
+            "--duration",
+            "30m",
+            "--tags",
+            "deep,agent",
+        ],
+    );
+    run_ok(
+        &context,
+        [
+            "ccplan",
+            "add",
+            "--id",
+            "deep-focus",
+            "--title",
+            "Renamed Focus",
+            "--start",
+            "11:10",
+            "--duration",
+            "20m",
+        ],
+    );
+    run_ok(
+        &context,
+        [
+            "ccplan",
+            "edit",
+            "deep-focus",
+            "--end",
+            "11:40",
+            "--notify",
+            "10m",
+            "--run",
+            "/bin/echo",
+            "hello",
+        ],
+    );
+    run_ok(
+        &context,
+        ["ccplan", "edit", "deep-focus", "--duration", "45m"],
+    );
+
+    let err = run_err(
+        &context,
+        [
+            "ccplan",
+            "edit",
+            "deep-focus",
+            "--end",
+            "12:00",
+            "--duration",
+            "30m",
+        ],
+    );
+    assert_eq!(err.exit_code(), 2);
+
+    run_ok(&context, ["ccplan", "done", "deep-focus"]);
+    let err = run_err(
+        &context,
+        [
+            "ccplan",
+            "add",
+            "--id",
+            "deep-focus",
+            "--title",
+            "Reuse",
+            "--start",
+            "13:00",
+            "--duration",
+            "30m",
+        ],
+    );
+    assert_eq!(err.exit_code(), 6);
+    let err = run_err(&context, ["ccplan", "skip", "deep-focus"]);
+    assert_eq!(err.exit_code(), 6);
+    let err = run_err(
+        &context,
+        ["ccplan", "edit", "missing", "--title", "Missing"],
+    );
+    assert_eq!(err.exit_code(), 3);
+    let err = run_err(&context, ["ccplan", "rm", "missing"]);
+    assert_eq!(err.exit_code(), 3);
+
+    let stored = context.store.load_plan(&date()).unwrap().unwrap();
+    assert_eq!(stored.blocks[0].id.as_str(), "deep-focus");
+    assert_eq!(stored.blocks[0].title, "Renamed Focus");
+    assert!(stored.blocks[0].tags.is_empty());
+    assert_eq!(
+        stored.blocks[0].run.as_ref().map(Run::as_slice),
+        Some(["/bin/echo".to_owned(), "hello".to_owned()].as_slice())
+    );
+
+    let (_temp, empty_context) = test_context_at("2026-06-08T10:00:00+05:30[Asia/Kolkata]");
+    let err = run_err(&empty_context, ["ccplan", "show", "--date", "2026-06-08"]);
+    assert_eq!(err.exit_code(), 3);
+}
+
+#[test]
+fn read_queries_return_json_arrays_and_reconcile_overdue_blocks() {
+    let (_temp, context) = test_context_at("2026-06-08T11:10:00+05:30[Asia/Kolkata]");
+    let mut plan = plan();
+    plan.blocks[0].status = Status::Active;
+    plan.blocks.push(block_with(
+        "stale",
+        "Stale pending",
+        "09:00",
+        Span::Duration(DurationSpec::from_seconds(30 * 60).unwrap()),
+    ));
+    context
+        .store
+        .set_plan(&plan, HistoryPolicy::Preserve)
+        .unwrap();
+
+    let now: Value =
+        serde_json::from_slice(&run_ok(&context, ["ccplan", "now", "--json"])).unwrap();
+    let next: Value =
+        serde_json::from_slice(&run_ok(&context, ["ccplan", "next", "--json"])).unwrap();
+    let agenda: Value =
+        serde_json::from_slice(&run_ok(&context, ["ccplan", "agenda", "--json"])).unwrap();
+
+    assert_eq!(
+        now,
+        serde_json::json!([
+            {
+                "end": "11:30",
+                "id": "focus",
+                "start": "11:00",
+                "status": "active",
+                "title": "Focus time",
+            }
+        ])
+    );
+    assert_eq!(next.as_array().unwrap()[0]["id"], "lunch");
+    assert!(
+        agenda
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|block| block["id"] == "lunch")
+    );
+
+    let stored = context.store.load_plan(&date()).unwrap().unwrap();
+    assert_eq!(
+        stored
+            .blocks
+            .iter()
+            .find(|block| block.id.as_str() == "stale")
+            .unwrap()
+            .status,
+        Status::Missed
+    );
+}
+
+#[test]
+fn human_read_outputs_cover_empty_and_non_empty_arrays() {
+    let (_temp, context) = test_context_at("2026-06-08T10:00:00+05:30[Asia/Kolkata]");
+    context
+        .store
+        .set_plan(&plan(), HistoryPolicy::Preserve)
+        .unwrap();
+
+    let show = String::from_utf8(run_ok(&context, ["ccplan", "show"])).unwrap();
+    let now = String::from_utf8(run_ok(&context, ["ccplan", "now"])).unwrap();
+    let agenda = String::from_utf8(run_ok(&context, ["ccplan", "agenda"])).unwrap();
+
+    assert!(show.contains("[[block]]"));
+    assert_eq!(now.trim(), "[]");
+    assert_eq!(agenda.trim(), "2 item(s)");
+
+    let finished = Plan {
+        date: date(),
+        timezone: "Asia/Kolkata".parse().unwrap(),
+        blocks: vec![{
+            let mut block = block_with(
+                "done",
+                "Done",
+                "09:00",
+                Span::Duration(DurationSpec::from_seconds(30 * 60).unwrap()),
+            );
+            block.status = Status::Done;
+            block
+        }],
+    };
+    context
+        .store
+        .set_plan(&finished, HistoryPolicy::Override)
+        .unwrap();
+    let next: serde_json::Value =
+        serde_json::from_slice(&run_ok(&context, ["ccplan", "next", "--json"])).unwrap();
+    assert_eq!(next.as_array().unwrap().len(), 0);
+}
+
+#[test]
+fn apply_dry_run_reports_diff_and_real_apply_is_idempotent() {
+    let (_temp, context) = test_context_at("2026-06-08T10:00:00+05:30[Asia/Kolkata]");
+    context
+        .store
+        .set_plan(&plan(), HistoryPolicy::Preserve)
+        .unwrap();
+
+    let dry_run = String::from_utf8(run_ok(&context, ["ccplan", "apply", "--dry-run"])).unwrap();
+
+    assert!(dry_run.contains("add "));
+    assert!(context.scheduler.calls().is_empty());
+    assert!(context.store.list_triggers().unwrap().is_empty());
+
+    run_ok(&context, ["ccplan", "apply"]);
+
+    assert_eq!(context.scheduler.calls().len(), 6);
+    assert_eq!(context.scheduler.triggers().len(), 6);
+    assert_eq!(context.store.list_triggers().unwrap().len(), 6);
+    context.scheduler.clear_calls();
+
+    run_ok(&context, ["ccplan", "apply"]);
+
+    assert!(context.scheduler.calls().is_empty());
+}
+
+#[test]
+fn clear_requires_yes_and_purge_removes_without_archive() {
+    let (_temp, context) = test_context_at("2026-06-08T10:00:00+05:30[Asia/Kolkata]");
+    context
+        .store
+        .set_plan(&plan(), HistoryPolicy::Preserve)
+        .unwrap();
+
+    let err = run_err(&context, ["ccplan", "clear"]);
+    assert_eq!(err.exit_code(), 2);
+
+    run_ok(&context, ["ccplan", "clear", "--yes", "--purge"]);
+
+    assert!(context.store.load_plan(&date()).unwrap().is_none());
+    assert!(!context.store.archive_path(&date()).exists());
+}
+
+#[test]
+fn remaining_command_branches_are_covered() {
+    let (_temp, context) = test_context_at("2026-06-08T10:00:00+05:30[Asia/Kolkata]");
+
+    run_ok(
+        &context,
+        [
+            "ccplan",
+            "add",
+            "--title",
+            "!!!",
+            "--start",
+            "11:00",
+            "--end",
+            "11:30",
+            "--run",
+            "/bin/echo",
+        ],
+    );
+    assert_eq!(
+        context.store.load_plan(&date()).unwrap().unwrap().blocks[0]
+            .id
+            .as_str(),
+        "block"
+    );
+    assert_eq!(
+        run_err(
+            &context,
+            ["ccplan", "add", "--title", "Bad", "--start", "12:00"]
+        )
+        .exit_code(),
+        2
+    );
+    assert_eq!(
+        run_err(
+            &context,
+            [
+                "ccplan",
+                "add",
+                "--title",
+                "Bad",
+                "--start",
+                "12:00",
+                "--end",
+                "12:30",
+                "--duration",
+                "30m",
+            ],
+        )
+        .exit_code(),
+        2
+    );
+    run_ok(&context, ["ccplan", "done", "block"]);
+    assert_eq!(run_err(&context, ["ccplan", "rm", "block"]).exit_code(), 6);
+
+    let (_temp, dry_clear) = test_context_at("2026-06-08T10:00:00+05:30[Asia/Kolkata]");
+    dry_clear
+        .store
+        .set_plan(&plan(), HistoryPolicy::Preserve)
+        .unwrap();
+    run_ok(&dry_clear, ["ccplan", "apply"]);
+    run_ok(&dry_clear, ["ccplan", "clear", "--yes", "--dry-run"]);
+    assert!(dry_clear.store.load_plan(&date()).unwrap().is_some());
+
+    let (_temp, terminal_apply) = test_context_at("2026-06-08T10:00:00+05:30[Asia/Kolkata]");
+    let mut terminal_plan = plan();
+    for block in &mut terminal_plan.blocks {
+        block.status = Status::Done;
+    }
+    terminal_apply
+        .store
+        .set_plan(&terminal_plan, HistoryPolicy::Preserve)
+        .unwrap();
+    assert_eq!(
+        String::from_utf8(run_ok(&terminal_apply, ["ccplan", "apply"]))
+            .unwrap()
+            .trim(),
+        "no changes"
+    );
+
+    let (_temp, no_op_fire) = test_context_at("2026-06-08T11:00:00+05:30[Asia/Kolkata]");
+    no_op_fire
+        .store
+        .set_plan(&terminal_plan, HistoryPolicy::Preserve)
+        .unwrap();
+    let rev = focus_rev(&no_op_fire);
+    run_ok(
+        &no_op_fire,
+        fire_args("focus", "start", rev.as_str(), "2026-06-08T05:30:00Z"),
+    );
+    assert!(
+        std::fs::read_to_string(no_op_fire.store.fire_log_path())
+            .unwrap()
+            .contains("no-op")
+    );
+
+    let (_temp, seconds_context) = test_context_at("2026-06-08T11:00:30+05:30[Asia/Kolkata]");
+    let mut seconds_plan = Plan {
+        date: date(),
+        timezone: "Asia/Kolkata".parse().unwrap(),
+        blocks: vec![block_with(
+            "seconds",
+            "Seconds",
+            "11:00",
+            Span::Duration(DurationSpec::from_seconds(90).unwrap()),
+        )],
+    };
+    seconds_plan.blocks[0].status = Status::Active;
+    seconds_context
+        .store
+        .set_plan(&seconds_plan, HistoryPolicy::Preserve)
+        .unwrap();
+    let now: serde_json::Value =
+        serde_json::from_slice(&run_ok(&seconds_context, ["ccplan", "now", "--json"])).unwrap();
+    assert_eq!(now.as_array().unwrap()[0]["end"], "11:01:30");
+
+    let (_temp, agenda_edge) = test_context_at("2026-06-08T11:30:00+05:30[Asia/Kolkata]");
+    let mut agenda_plan = plan();
+    agenda_plan.blocks[0].status = Status::Active;
+    agenda_edge
+        .store
+        .set_plan(&agenda_plan, HistoryPolicy::Preserve)
+        .unwrap();
+    let agenda: serde_json::Value =
+        serde_json::from_slice(&run_ok(&agenda_edge, ["ccplan", "agenda", "--json"])).unwrap();
+    assert!(
+        agenda
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|block| block["id"] != "focus")
+    );
+}
+
+#[test]
+fn clear_uses_reconciler_to_remove_triggers_then_archives_plan() {
+    let (_temp, context) = test_context_at("2026-06-08T10:00:00+05:30[Asia/Kolkata]");
+    context
+        .store
+        .set_plan(&plan(), HistoryPolicy::Preserve)
+        .unwrap();
+    run_ok(&context, ["ccplan", "apply"]);
+    context.scheduler.clear_calls();
+
+    run_ok(&context, ["ccplan", "clear", "--yes"]);
+
+    assert_eq!(context.store.load_plan(&date()).unwrap(), None);
+    assert!(context.store.archive_path(&date()).exists());
+    assert_eq!(context.store.list_triggers().unwrap(), Vec::new());
+    assert!(
+        context
+            .scheduler
+            .calls()
+            .iter()
+            .all(|call| matches!(call, SchedulerCall::Remove(_)))
+    );
+}
+
+#[test]
+fn fire_covers_missing_notify_missed_close_and_run_deferred_paths() {
+    let (_temp, missing) = test_context_at("2026-06-08T11:00:00+05:30[Asia/Kolkata]");
+    run_ok(
+        &missing,
+        fire_args("focus", "start", "0000000000000000", "2026-06-08T05:30:00Z"),
+    );
+
+    let (_temp, no_block) = test_context_at("2026-06-08T11:00:00+05:30[Asia/Kolkata]");
+    no_block
+        .store
+        .set_plan(&plan(), HistoryPolicy::Preserve)
+        .unwrap();
+    run_ok(
+        &no_block,
+        fire_args(
+            "missing",
+            "start",
+            "0000000000000000",
+            "2026-06-08T05:30:00Z",
+        ),
+    );
+
+    let (_temp, notify_context) = test_context_at("2026-06-08T10:55:00+05:30[Asia/Kolkata]");
+    notify_context
+        .store
+        .set_plan(&plan(), HistoryPolicy::Preserve)
+        .unwrap();
+    let rev = focus_rev(&notify_context);
+    run_ok(
+        &notify_context,
+        fire_args("focus", "notify", rev.as_str(), "2026-06-08T05:25:00Z"),
+    );
+    assert_eq!(notify_context.notifier.notifications().len(), 1);
+
+    let (_temp, run_context) = test_context_at("2026-06-08T11:00:00+05:30[Asia/Kolkata]");
+    let mut run_plan = plan();
+    run_plan.blocks[0].run = Some(Run::new(vec!["/bin/echo".to_owned()]).unwrap());
+    run_context
+        .store
+        .set_plan(&run_plan, HistoryPolicy::Preserve)
+        .unwrap();
+    let rev = focus_rev(&run_context);
+    run_ok(
+        &run_context,
+        fire_args("focus", "start", rev.as_str(), "2026-06-08T05:30:00Z"),
+    );
+    assert!(
+        std::fs::read_to_string(run_context.store.fire_log_path())
+            .unwrap()
+            .contains("run-deferred")
+    );
+
+    let (_temp, missed_context) = test_context_at("2026-06-08T11:02:00+05:30[Asia/Kolkata]");
+    missed_context
+        .store
+        .set_plan(&plan(), HistoryPolicy::Preserve)
+        .unwrap();
+    let rev = focus_rev(&missed_context);
+    run_ok(
+        &missed_context,
+        fire_args("focus", "start", rev.as_str(), "2026-06-08T05:30:00Z"),
+    );
+    assert_eq!(
+        missed_context
+            .store
+            .load_plan(&date())
+            .unwrap()
+            .unwrap()
+            .blocks[0]
+            .status,
+        Status::Missed
+    );
+
+    let (_temp, close_context) = test_context_at("2026-06-08T11:30:00+05:30[Asia/Kolkata]");
+    let mut active = plan();
+    active.blocks[0].status = Status::Active;
+    close_context
+        .store
+        .set_plan(&active, HistoryPolicy::Preserve)
+        .unwrap();
+    let rev = focus_rev(&close_context);
+    run_ok(
+        &close_context,
+        fire_args("focus", "end", rev.as_str(), "2026-06-08T06:00:00Z"),
+    );
+    assert_eq!(
+        close_context
+            .store
+            .load_plan(&date())
+            .unwrap()
+            .unwrap()
+            .blocks[0]
+            .status,
+        Status::Expired
+    );
+}
+
+#[test]
+fn fire_start_records_ledger_notifies_updates_status_and_deduplicates() {
+    let (_temp, context) = test_context_at("2026-06-08T11:00:00+05:30[Asia/Kolkata]");
+    context
+        .store
+        .set_plan(&plan(), HistoryPolicy::Preserve)
+        .unwrap();
+    let rev = context.store.load_plan(&date()).unwrap().unwrap().blocks[0].schedule_rev();
+
+    let args = [
+        "ccplan",
+        "fire",
+        "--date",
+        "2026-06-08",
+        "--id",
+        "focus",
+        "--event",
+        "start",
+        "--rev",
+        rev.as_str(),
+        "--at",
+        "2026-06-08T05:30:00Z",
+    ];
+    run_ok(&context, args);
+    run_ok(&context, args);
+
+    let stored = context.store.load_plan(&date()).unwrap().unwrap();
+    assert_eq!(stored.blocks[0].status, Status::Active);
+    assert_eq!(context.notifier.notifications().len(), 1);
+    assert!(
+        std::fs::read_to_string(context.store.fire_log_path())
+            .unwrap()
+            .contains("focus start")
+    );
+}
+
+#[test]
+fn stale_fire_noops_without_recording_a_notification() {
+    let (_temp, context) = test_context_at("2026-06-08T11:00:00+05:30[Asia/Kolkata]");
+    context
+        .store
+        .set_plan(&plan(), HistoryPolicy::Preserve)
+        .unwrap();
+
+    run_ok(
+        &context,
+        [
+            "ccplan",
+            "fire",
+            "--date",
+            "2026-06-08",
+            "--id",
+            "focus",
+            "--event",
+            "start",
+            "--rev",
+            "0000000000000000",
+            "--at",
+            "2026-06-08T05:30:00Z",
+        ],
+    );
+
+    let stored = context.store.load_plan(&date()).unwrap().unwrap();
+    assert_eq!(stored.blocks[0].status, Status::Pending);
+    assert!(context.notifier.notifications().is_empty());
+}
+
+#[test]
+fn status_doctor_and_completions_are_non_interactive() {
+    let (_temp, context) = test_context_at("2026-06-08T10:00:00+05:30[Asia/Kolkata]");
+
+    assert!(
+        String::from_utf8(run_ok(&context, ["ccplan", "status"]))
+            .unwrap()
+            .contains("triggers")
+    );
+    assert!(
+        String::from_utf8(run_ok(&context, ["ccplan", "doctor"]))
+            .unwrap()
+            .contains("scheduler")
+    );
+    assert!(
+        String::from_utf8(run_ok(&context, ["ccplan", "completions", "bash"]))
+            .unwrap()
+            .contains("Stage 7")
+    );
+}
+
+fn run_ok<C, S, N, I, T>(context: &Context<C, S, N>, args: I) -> Vec<u8>
+where
+    C: ccplan::time::Clock,
+    S: ccplan::context::Scheduler,
+    N: ccplan::context::Notifier,
+    I: IntoIterator<Item = T>,
+    T: Into<std::ffi::OsString> + Clone,
+{
+    let cli = Cli::parse_from(args);
+    let mut output = Vec::new();
+    run_with_context(cli, &mut output, context).expect("command should succeed");
+    output
+}
+
+fn run_err<C, S, N, I, T>(context: &Context<C, S, N>, args: I) -> Error
+where
+    C: ccplan::time::Clock,
+    S: ccplan::context::Scheduler,
+    N: ccplan::context::Notifier,
+    I: IntoIterator<Item = T>,
+    T: Into<std::ffi::OsString> + Clone,
+{
+    let cli = Cli::parse_from(args);
+    let mut output = Vec::new();
+    run_with_context(cli, &mut output, context).expect_err("command should fail")
+}
+
+fn focus_rev<C, S, N>(context: &Context<C, S, N>) -> ccplan::model::ScheduleRev {
+    context.store.load_plan(&date()).unwrap().unwrap().blocks[0].schedule_rev()
+}
+
+fn fire_args(id: &str, event: &str, rev: &str, at: &str) -> Vec<String> {
+    vec![
+        "ccplan".to_owned(),
+        "fire".to_owned(),
+        "--date".to_owned(),
+        "2026-06-08".to_owned(),
+        "--id".to_owned(),
+        id.to_owned(),
+        "--event".to_owned(),
+        event.to_owned(),
+        "--rev".to_owned(),
+        rev.to_owned(),
+        "--at".to_owned(),
+        at.to_owned(),
+    ]
+}
+
+fn test_context_at(
+    now: &str,
+) -> (
+    TempDir,
+    Context<FixedClock, RecordingScheduler, RecordingNotifier>,
+) {
+    let temp = TempDir::new().unwrap();
+    let store = Store::new(temp.path());
+    let clock = FixedClock::new(now.parse::<Zoned>().unwrap());
+    let context = Context::new(
+        store,
+        clock,
+        RecordingScheduler::default(),
+        RecordingNotifier::default(),
+    );
+    (temp, context)
+}
+
+fn plan_toml() -> &'static str {
+    r#"
+date = "2026-06-08"
+timezone = "Asia/Kolkata"
+
+[[block]]
+id = "focus"
+title = "Focus time"
+start = "11:00"
+end = "11:30"
+notify = "5m"
+tags = ["deep-work"]
+status = "pending"
+
+[[block]]
+id = "lunch"
+title = "Lunch"
+start = "14:00"
+duration = "30m"
+status = "pending"
+"#
+}
+
+fn plan() -> Plan {
+    Plan::from_toml(plan_toml()).unwrap()
+}
+
+fn block_with(id: &str, title: &str, start: &str, span: Span) -> Block {
+    Block {
+        id: BlockId::new(id).unwrap(),
+        title: title.to_owned(),
+        start: start.parse::<ClockTime>().unwrap(),
+        span,
+        notify: Lead::from_seconds(0).unwrap(),
+        tags: Vec::new(),
+        status: Status::Pending,
+        run: None,
+    }
+}
+
+fn date() -> PlanDate {
+    "2026-06-08".parse().unwrap()
+}
+
+#[allow(dead_code)]
+fn _timezone() -> TimeZoneName {
+    "Asia/Kolkata".parse().unwrap()
+}
+
+#[allow(dead_code)]
+fn _timestamp(value: &str) -> Timestamp {
+    value.parse().unwrap()
+}
+
+#[allow(dead_code)]
+fn _grace() -> SignedDuration {
+    SignedDuration::from_secs(90)
+}

@@ -402,6 +402,11 @@ impl PlanDate {
     pub const fn as_jiff_date(&self) -> Date {
         self.0
     }
+
+    #[must_use]
+    pub const fn from_jiff_date(date: Date) -> Self {
+        Self(date)
+    }
 }
 
 impl fmt::Display for PlanDate {
@@ -851,6 +856,20 @@ impl ScheduleRev {
         Self(hash.to_hex()[..16].to_owned())
     }
 
+    /// Parses a schedule revision embedded in a trigger.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the rev is not the 16-character lowercase hex form ccplan emits.
+    pub fn new(value: impl Into<String>) -> Result<Self, FieldParseError> {
+        let value = value.into();
+        if value.len() == 16 && value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            Ok(Self(value))
+        } else {
+            Err(FieldParseError::ScheduleRev { value })
+        }
+    }
+
     #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
@@ -860,6 +879,14 @@ impl ScheduleRev {
 impl fmt::Display for ScheduleRev {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(self.as_str())
+    }
+}
+
+impl FromStr for ScheduleRev {
+    type Err = FieldParseError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Self::new(value)
     }
 }
 
@@ -875,6 +902,8 @@ pub enum FieldParseError {
     ClockTime { value: String },
     #[error("invalid duration `{value}`")]
     Duration { value: String },
+    #[error("invalid schedule rev `{value}`")]
+    ScheduleRev { value: String },
     #[error("run argv must contain argv[0]")]
     Run,
 }

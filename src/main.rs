@@ -13,7 +13,7 @@ fn main() -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("error: {error:#}");
-            ExitCode::FAILURE
+            ExitCode::from(error.exit_code())
         }
     }
 }
