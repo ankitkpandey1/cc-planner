@@ -1,0 +1,210 @@
+# ccplan — Working Notes
+
+> **READ THIS FILE FIRST, before starting any implementation step.**
+> It is the project's durable memory. Context windows get compacted and summarized; this file does
+> not. Every decision, gotcha, learning, and observation lives here so no knowledge is lost between
+> sessions or agents. **Append to it as you work** — if you decide something, learn something, or
+> get surprised by something, write it down here in the same commit.
+
+This folder (`development/`) is **dev-only scaffolding** (notes, checklist, audit log). It is not
+part of the shipped product and may be deleted before/at the open-source release. Keep all
+implementation-process docs here.
+
+---
+
+## 0. Orientation (what to read, in order)
+
+1. This file (`development/notes.md`) — decisions & gotchas.
+2. `DESIGN.md` (repo root) — the locked product/architecture spec. The source of truth for *what*.
+3. `development/implementation_checklist.md` — the staged build plan. The source of truth for *how* and *in what order*.
+4. `development/backlog.md` — tasks discovered during implementation (separate from the stable stage plan).
+5. `development/audit_log.md` — append your per-stage evidence reports here.
+
+---
+
+## 1. Locked decisions (do not relitigate without updating DESIGN.md)
+
+| # | Decision | Rationale |
+|---|----------|-----------|
+| D1 | **Language: Rust, edition 2024**, single binary per OS. | Fast fire target; cross-platform; locked by user. |
+| D2 | **Plan/config format: TOML** (crate `toml` 1.x), NOT YAML. | `serde_yaml` is **archived**; `serde_yml` carries **RUSTSEC-2025-0068** + provenance issues; `serde_yaml_ng` is low-maintenance. `cargo-deny` would reject them. TOML is maintained, audited, and the least ambiguous format for agents/humans to edit. |
+| D3 | **Date/time: `jiff` 0.2** (`serde` feature). | Best-in-class IANA-zone + DST disambiguation; forces ambiguous-time resolution; bundles tzdb on Windows. Accept pre-1.0 (pin `"0.2"`). |
+| D4 | **No background daemon.** Native scheduler on every platform. | Locked by reviewer. systemd user timers / launchd agents / Windows Task Scheduler. |
+| D5 | **Schedule-only `rev`.** Hash covers only `id` + timing (`start`, `end`/`duration`, `notify`); excludes `status`, history, `title`, `tags`, `run`. | So lifecycle/content edits never invalidate live triggers (the `end`-trigger bug). See DESIGN §6.3, Inv-15. |
+| D6 | **Event-specific fire reconciliation.** `notify` overdue = no-op only; `start` overdue = `missed`; `end` overdue while active = `expired`/`done`. | A late lead-notification must never mark a block missed. DESIGN §7. |
+| D7 | **At-most-once via durable ledger** keyed `(date,id,event,rev,scheduled_at)`, atomic check-and-set before notify/run. | Survives scheduler retries / double-invoke / races. Inv-14, §6.4. |
+| D8 | **`run:` is argv-only, allowlisted, off by default.** No shell mode ever (NG9). | Plan file is a trust boundary; minimize it. DESIGN §9. |
+| D9 | **Immutable history.** `done/skipped/missed/expired` blocks never silently destroyed; `set` retains them even if omitted; only `--override-history` / `clear --purge` touch them. | Inv-7. |
+| D10 | **Library + thin-binary split + trait-injected side effects** (`Clock`, `Scheduler`, `Notifier`, fs root). | The only way to reach 100% coverage; lets tests avoid real OS scheduling. |
+| D11 | **Dual license `MIT OR Apache-2.0`.** Repo currently has Apache-2.0 only → rename to `LICENSE-APACHE`, add `LICENSE-MIT`, set `license = "MIT OR Apache-2.0"`. | Rust-ecosystem convention. |
+| D12 | **100% line coverage gate**, with documented `#[coverage(off)]` exclusions for platform real-IO backends and the `main` shim. | "100%" means 100% of testable logic; platform `#[cfg]` real-IO can't run on one CI OS. |
+| D13 | **Branch model:** all work on `dev`; CI runs on every push/PR; merge `dev`→`main` only when production-ready; `release-plz` on `main` maintains a release PR; merging it tags `vX.Y.Z` which triggers the `dist` release build. | User-requested; see checklist Stage 9. |
+| D14 | **Engineering mandates (hard):** everything SOTA + idiomatic Rust (edition 2024); **strong type safety — make illegal states unrepresentable** (newtypes, enums-not-strings, parse-don't-validate); **`#![forbid(unsafe_code)]`** — zero unsafe in our code (backends chosen to avoid it, e.g. `schtasks` shell-out over COM — see D16); **comments explain WHY (design decisions/invariants) only, never WHAT** — no code-narration. | User-mandated; enforced in `CONVENTIONS.md` + checklist + clippy pedantic. |
+| D15 | **Per-stage rhythm:** every stage = Recon/Research → Implement (TDD) → Self-review & fix → DoD gate → Self-reflect (learnings → notes §6) → capture discovered tasks → audit entry → commit. Discovered tasks go to **`development/backlog.md`** (separate from the stable stage plan), never inline into the checklist. | User-mandated; see checklist HOW TO USE + PER-STAGE RHYTHM. |
+| D16 | **No archived/unmaintained dependencies.** Windows scheduling therefore **shells out to `schtasks.exe` (XML task)** instead of `planif` (archived) or `windows`-rs COM (would force `unsafe`). All three backends shell out to the native scheduler CLI — uniform and dependency-light. | User-mandated ("do not use archived dep"); preserves D14's no-unsafe rule. |
+| D17 | **Commit convention:** Conventional Commits, but **no `Co-Authored-By` / "Generated with Claude" trailer** of any kind. Clean commit messages only. | User-mandated. |
+| D18 | **Performance is a feature.** The binary is a scheduler fire-target invoked many times a day — fast startup, no needless allocation/cloning, no blocking work on the hot path; borrow over clone, stream over buffer where it matters. Don't micro-optimize pure-logic clarity, but never ship gratuitously wasteful code. | User-mandated. |
+| D19 | **"Don't Make Me Think" CLI UX** (Steve Krug). The interface must be self-evident: obvious command names, consistent flag patterns, helpful `--help` on every command, error messages that say exactly what's wrong **and** how to fix it, sensible defaults so the common path needs almost no flags, and `doctor` to diagnose setup. Zero cognitive load for the common case. | User-mandated. |
+
+---
+
+## 2. Pinned toolchain & dependencies (verified 2026-06-08)
+
+Use these versions as the floor. `cargo add` will pick the latest compatible; pin majors as shown.
+
+```toml
+[package]
+edition      = "2024"
+rust-version = "1.85"            # MSRV; edition 2024 stabilized in 1.85
+
+[dependencies]
+clap          = { version = "4", features = ["derive"] }
+toml          = "1"
+serde         = { version = "1", features = ["derive"] }
+serde_json    = "1"
+jiff          = { version = "0.2", features = ["serde"] }
+directories   = "5"
+blake3        = "1"
+notify-rust   = "4"
+fs2           = "0.4"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+plist         = "1"             # maintained; authors the LaunchAgent plist
+
+# Windows: NO extra dependency. We shell out to `schtasks.exe` with an XML task definition
+# (see D16) — this avoids the archived `planif` crate AND avoids `windows`-rs COM, which would
+# force `unsafe` in our code. All three platforms shell out to the native scheduler CLI.
+
+[build-dependencies]
+clap          = { version = "4", features = ["derive"] }
+clap_complete = "4"
+clap_mangen   = "0.2"
+
+[dev-dependencies]
+assert_cmd    = "2"
+assert_fs     = "1"
+predicates    = "3"
+tempfile      = "3"
+insta         = { version = "1", features = ["json", "redactions"] }
+proptest      = "1"
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(coverage,coverage_nightly)'] }
+```
+
+Tooling (installed in CI, not deps): `cargo-llvm-cov`, `cargo-deny`, `cargo-dist` (`dist`),
+`release-plz`. CI actions: `dtolnay/rust-toolchain`, `Swatinem/rust-cache@v2`,
+`taiki-e/install-action`, `codecov/codecov-action@v5`, `release-plz/release-plz-action@v0.5`,
+`EmbarkStudios/cargo-deny-action@v2`.
+
+---
+
+## 3. Platform gotchas (hard-won; from research — confirm in practice)
+
+### Linux — systemd `--user` transient timers (shell out to `systemd-run`)
+- One-shot at absolute local time: `systemd-run --user --unit="ccplan-<idhash>-<rev>-<event>"
+  --on-calendar="YYYY-MM-DD HH:MM:SS" --timer-property=AccuracySec=1s <abs-path-ccplan> fire …`.
+- **Default `AccuracySec` is 60s** → must set `AccuracySec=1s` or alerts drift up to a minute.
+- Transient timers auto-clean (`systemd-run` sets `RemainAfterElapse=no`) — no manual cleanup needed.
+- **Do NOT set `Persistent=true`** (that's catch-up replay; we forbid it, NG8).
+- Use the **absolute path** to the binary — the user manager's PATH is minimal.
+- **Notification env:** the user manager has a sanitized env. Pass
+  `--setenv=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/<uid>/bus` (and capture `DISPLAY`/
+  `WAYLAND_DISPLAY` at `apply` time and `--setenv=` them) or notifications silently fail.
+- Validate the calendar string with `systemd-analyze calendar "<ts>"` and surface errors.
+- List: `systemctl --user list-timers 'ccplan-*'`. Cancel: `systemctl --user stop <unit>.timer` (transient → unloads).
+- Idempotent apply: `stop` the unit name first (ignore "not loaded"), then `systemd-run`.
+
+### macOS — launchd LaunchAgents (`plist` crate to author + `launchctl` to load)
+- `StartCalendarInterval` is **inherently recurring** (no `Year` key) → a one-shot must **self-destruct**.
+  The `fire` path must, as its last step, `launchctl bootout gui/<uid>/<label>` and delete its own
+  plist. (Look up its own label from an arg/env baked into the plist.)
+- Do NOT use `RunAtLoad` (fires at load, not at the scheduled time).
+- Plist at `~/Library/LaunchAgents/io.ccplan.<idhash>.<rev>.<event>.plist`; `Label` = filename stem.
+- Load: `launchctl bootstrap gui/$(id -u) <plist>`. Cancel: `launchctl bootout gui/$(id -u)/<label>` + rm.
+- Needs an **active GUI (`gui/<uid>`) session**; over pure SSH `bootstrap gui/<uid>` fails.
+- Notifications: unsigned bare CLI binaries may be silently dropped; a bundle id helps. `osascript -e
+  'display notification …'` is the pragmatic fallback. (notify-rust handles the API; delivery is the caveat.)
+
+### Windows — Task Scheduler (shell out to `schtasks.exe` with an XML task; see D16)
+- **No crate.** Do NOT use `planif` (archived) or `windows`-rs COM (would force `unsafe`, violating
+  `#![forbid(unsafe_code)]`). Shell out to `schtasks.exe`, consistent with the Linux/macOS backends.
+- **Create:** write a task XML to a temp file, then `schtasks /Create /TN "\ccplan\<idhash>-<rev>-<event>"
+  /XML <file> /F`. The XML gives full control and **second precision** (unlike `/ST`, which is `HH:mm`
+  only). Minimal XML shape:
+  - `<TimeTrigger><StartBoundary>2026-06-08T15:30:00</StartBoundary><EndBoundary>…</EndBoundary></TimeTrigger>`
+  - `<Settings>`: `<DeleteExpiredTaskAfter>PT0S</DeleteExpiredTaskAfter>` + `<Hidden>true</Hidden>` +
+    `<StartWhenAvailable>false</StartWhenAvailable>` (no late catch-up — matches NG8).
+  - `<Actions><Exec><Command>` = absolute path to `ccplan.exe`, `<Arguments>` = `fire …`.
+  - `<Principal>` running as the interactive user, **only when logged on** (needed for notifications).
+- **Namespace:** the `\ccplan\` task-folder prefix in `/TN`. **List:** `schtasks /Query /TN \ccplan\
+  /FO LIST` (or `/XML`). **Delete:** `schtasks /Delete /TN "\ccplan\<…>" /F`. Idempotent: `/Create /F`
+  overwrites; pre-delete not required.
+- **Auto-cleanup:** `EndBoundary` + `DeleteExpiredTaskAfter=PT0S` makes the one-shot task delete itself
+  after firing (the Windows analog of systemd's transient auto-clean).
+- **Console flash:** the task launches `ccplan.exe`; to avoid a console window, compile the fire path
+  as a `#![windows_subsystem = "windows"]` GUI-subsystem shim. (`<Hidden>` hides the task in the UI,
+  not the console.)
+- **Gotcha:** `schtasks` query output is locale-dependent and brittle to parse — rely on our own
+  `triggers.json` for state, and use `schtasks` only for create/delete (clean) and existence checks.
+
+### Notifications — `notify-rust` 4
+- Basic title+body works on all three OSes from one API: `Notification::new().summary(t).body(b).show()?`.
+- **Action buttons** (Done/Snooze) are **Linux-only** in notify-rust and need a **resident/blocking
+  process** to receive the callback (`wait_for_action` blocks). Our fire path is fire-and-exit →
+  action buttons are a **later** feature, Linux-first, and must be `#[cfg]`-gated. Don't attempt cross-platform.
+
+---
+
+## 4. Testability notes (critical for the 100% gate)
+
+- **`jiff` has NO clock mocking** (the author declined it; no `JIFF_NOW`). You **must** inject a
+  `Clock` trait; real impl calls `jiff::Zoned::now()`, test impl returns a fixed `Zoned`.
+- Same pattern for `Scheduler` and `Notifier`: trait + real impl (shell-out / native) + recording fake.
+  Logic depends on the trait; tests inject fakes and assert on recorded calls. Real OS scheduling is
+  NEVER touched in unit tests.
+- Thread a `Context { clock, scheduler, notifier, fs_root }` through `lib::run`. Tests build a
+  `Context` of fakes over an `assert_fs::TempDir`.
+- `main.rs` stays ~10 lines: parse → `run` → `ExitCode`. The `assert_cmd` e2e tests cover it; it may
+  also be `#[coverage(off)]`.
+- Coverage exclusions (the ONLY allowed ones): platform `#[cfg(target_os=…)]` real-backend modules,
+  the real `SystemClock`/shell-out impls, `unreachable!()`/defensive `panic!`, and `main`. Mark with
+  `#[cfg_attr(coverage_nightly, coverage(off))]`. Put `#![cfg_attr(coverage_nightly,
+  feature(coverage_attribute))]` at the crate root.
+- Coverage runs on **nightly** (`cargo +nightly llvm-cov`). The crate must still build/clippy clean on stable.
+
+---
+
+## 5. Open items / things to verify during build
+
+- Confirm the exact `schtasks /Create /XML` task-XML schema (TimeTrigger + EndBoundary +
+  DeleteExpiredTaskAfter + Principal) on a real Windows runner.
+- Confirm `notify-rust` macOS delivery from a launchd-spawned process (TCC/bundle-id behavior).
+- Decide how to integration-test the real schedulers in CI (likely `#[ignore]`d tests run per-OS, or a
+  `--features integration` gate). Real timer firing in CI is flaky — keep it minimal and explicit.
+- Decide whether `ccplan fire` on macOS does its own bootout, or a tiny `fire-once` wrapper does.
+- `directories` v5 vs newer — confirm latest at implementation time.
+
+---
+
+## 6. Running log (append entries here — newest at top)
+
+> Format: `### YYYY-MM-DD — <stage/topic>` then bullets. Record decisions, surprises, dead-ends,
+> and anything a future session must know. This is the anti-amnesia log.
+
+### 2026-06-08 — planning hardened (decisions D14–D19, conventions, Windows backend)
+- Added engineering mandates: SOTA/idiomatic, `#![forbid(unsafe_code)]`, strong typing, comments=why,
+  performance (D18), Don't-Make-Me-Think CLI UX (D19), no-coauthor-trailer commits (D17).
+- **Windows backend changed planif → `schtasks.exe /Create /XML`** (D16) to honor "no archived dep"
+  AND "no unsafe" — all three backends now uniformly shell out to the native scheduler CLI.
+- Wrote `CONVENTIONS.md` (root) as the canonical coding standard (Rust API Guidelines + Style Guide +
+  patterns book); checklist Coding Conventions is now its operational summary.
+- Self-review of all docs: grep-audited for stray YAML / planif / COM / co-author residue — clean;
+  cross-references resolve; CONVENTIONS.md wired into README + checklist + structure tree.
+- Known/expected: README links to OSS files (AGENTS.md, SECURITY.md, LICENSE-MIT, etc.) that are
+  created in Stage 8 — intentional forward-references describing the shipped product, not gaps.
+
+### 2026-06-08 — project seeded
+- DESIGN.md finalized through review round 3. Format switched YAML → TOML (D2). Stack pinned (§2).
+- Implementation checklist + audit log + this notes file created. No code yet.
+- NEXT: Stage 0 (repo & toolchain bootstrap) per `implementation_checklist.md`.
