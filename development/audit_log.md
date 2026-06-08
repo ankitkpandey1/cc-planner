@@ -1066,3 +1066,38 @@ before commit:
   100.00% line cover; `cargo deny` ok; release build ok.
 - Anti-gaming guard #1 (module-scope `coverage(off)`) still fails on the platform backends — that is
   the separate B-008 correction, tracked and not part of this stage.
+
+## Correction pass — backlog P1/P2 (2026-06-08, post-Stage-6)
+
+Cleared the PR #1 review backlog items before building forward, each as its own DoD-green commit.
+Full gate after the pass: `cargo fmt --check` clean; `clippy --all-targets --all-features -D warnings`
+clean; `cargo test --features test-fakes` → **128 passed; 0 failed; 0 filtered out** (1 ignored =
+sanctioned Linux systemd integration test); `RUSTFLAGS=--cfg coverage_nightly cargo +nightly llvm-cov
+--fail-under-lines 100` → **100.00%**; `cargo deny` ok; release build ok; anti-gaming guards #1 and #2
+both pass.
+
+- **B-014 (`1add9be`)** — store `atomic_write` test uses `assert_fs::TempDir`; empty-parent branch
+  covered via `ensure_parent` directly. No more `env::temp_dir()` / CWD pollution.
+- **B-011 + B-012 (`cd42d8d`)** — Inv-18: `now`/`next`/`agenda` reconcile in memory only
+  (`read_reconciled_plan`), never persisting or taking the write lock; `apply --dry-run` previews
+  without writing; only real `apply`/mutations persist. Reads now render a scannable human table
+  (countdown column for agenda) instead of `"N item(s)"`/`"[]"`. Byte-identical-read and human-output
+  tests added.
+- **B-007 (`760d6c8`)** — Inv-17: added `Store::update(date, default_lead, closure)` that holds the
+  exclusive lock across load→mutate→merge→write; routed `add`/`edit`/`rm`/`done`/`skip` and apply's
+  overdue reconciliation through it. 8-thread test proves no concurrent additive write is lost. Also
+  removed the always-true `notify` field from `FireDecision::Activate` (dead state per DESIGN §6.3:
+  the start event always notifies) — an untestable branch that an llvm-cov region-merge artifact
+  exposed once codegen shifted.
+- **B-008 (`03c6b20`)** — coverage honesty: pure helpers moved to a coverage-on `platform::format`
+  module, gated `any(target_os = "…", test)` so they compile + are unit-tested on every host
+  (including the Linux coverage job, which finally tests the Windows/macOS string logic). Backends
+  keep only IO with fn-level `coverage(off)`; the module-scope exclusions are gone, so guard #1
+  passes. Linux side (systemd/notify/format) is gate-verified here; **schtasks.rs/launchd.rs do not
+  compile on the Linux dev box and are verified by CI on Windows/macOS** (no cross-target std locally).
+- **B-006 (`9d16ad8`)** — completed Inv-16 acceptance: a lead-0 block schedules only start+end (no
+  separate notify trigger), a positive-lead block also gets a distinct earlier notify trigger.
+
+Still open (out of this pass's scope): B-002/3/4/5 (CI/macOS/Windows verification, packaging),
+B-009 (full launchd §6.1 grammar conformance test), B-010, B-013 (`--date` on done/skip/rm),
+B-015 (`is_lock_contention` narrowing), B-016 (status overcount).

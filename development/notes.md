@@ -437,3 +437,22 @@ Tooling (installed in CI, not deps): `cargo-llvm-cov`, `cargo-deny`, `cargo-dist
 - DESIGN.md finalized through review round 3. Format switched YAML → TOML (D2). Stack pinned (§2).
 - Implementation checklist + audit log + this notes file created. No code yet.
 - NEXT: Stage 0 (repo & toolchain bootstrap) per `implementation_checklist.md`.
+
+### 2026-06-08 — correction pass learnings (post-Stage-6, PR #1 backlog)
+- **Coverage honesty pattern for cfg-gated platform code:** pull pure logic into an OS-agnostic
+  module gated `#[cfg(any(target_os = "…", test))]`. It then compiles + is unit-tested on *every*
+  host (incl. the Linux coverage job), so Windows/macOS string logic is finally verifiable on Linux,
+  while never tripping `dead_code` in a non-test build of an OS that doesn't use it. Backends keep
+  only IO with **fn-level** `coverage(off)` — never module-scope (guard #1).
+- **`cargo test` must use `--features test-fakes`** — integration tests link the lib without
+  `cfg(test)`, so the fakes (`FixedClock`/`RecordingScheduler`/`RecordingNotifier`) are behind that
+  feature. Bare `cargo test` fails to compile the integration tests.
+- **llvm-cov region-merge artifacts are codegen-sensitive:** an always-true `if cond {}` (no else)
+  can flip a closing-brace line between covered/uncovered when unrelated edits change inlining. The
+  fix is to delete the dead branch, not to chase the artifact — here the `notify` field on
+  `FireDecision::Activate` was genuinely always-true per DESIGN §6.3, so removing it was correct.
+- **`--fail-under-lines` counts per-instantiation**, so a generic/closure branch hit in zero builds
+  (e.g. `required_plan`'s `None` arm) fails the gate even when a merged-segment view looks 100%. Add
+  a test that drives the missing branch (mutation against an absent plan → NotFound).
+- **zsh `noclobber`**: `cmd > file` errors if `file` exists; use `rm -f` first (or `>|`) when
+  capturing gate output to a temp file, or the stale file misleads.
