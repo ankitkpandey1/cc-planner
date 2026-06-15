@@ -86,13 +86,12 @@ impl Scheduler for NativeScheduler {
         };
         for entry in entries {
             let entry = entry.map_err(|error| SchedulerError::Operation(error.to_string()))?;
-            if let Some(file_name) = entry.file_name().to_str() {
-                if let Some(id) = file_name
+            if let Some(file_name) = entry.file_name().to_str()
+                && let Some(id) = file_name
                     .strip_prefix("io.ccplan.")
                     .and_then(|value| value.strip_suffix(".plist"))
-                {
-                    ids.push(id.to_owned());
-                }
+            {
+                ids.push(id.to_owned());
             }
         }
         ids.sort();
