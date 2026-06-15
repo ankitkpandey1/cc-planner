@@ -34,5 +34,5 @@ Project maintainers may remove, edit, or reject comments, commits, code, issues,
 contributions that are not aligned with this Code of Conduct. Serious or repeated violations can
 lead to a temporary or permanent ban from project spaces.
 
-Report conduct issues privately to ankitpandey@mammoth.io. Maintainers will respect the privacy and
+Report conduct issues privately to itsankitkp@gmail.com. Maintainers will respect the privacy and
 security of reporters as much as practical.

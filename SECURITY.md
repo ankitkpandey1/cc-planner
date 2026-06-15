@@ -1,6 +1,6 @@
 # Security Policy
 
-Report a private vulnerability by emailing ankitpandey@mammoth.io. Please do not open a public issue
+Report a private vulnerability by emailing itsankitkp@gmail.com. Please do not open a public issue
 for exploitable behavior until a fix or mitigation is available.
 
 ## Supported Versions

@@ -10,8 +10,7 @@ tightening on top:
 - [Rust Design Patterns](https://rust-unofficial.github.io/patterns/) (idioms, patterns, anti-patterns)
 - [Rust Performance Book](https://nnethercote.github.io/perf-book/)
 
-Both human contributors and AI agents must follow this. `CONTRIBUTING.md` points here; the build
-plan (`development/implementation_checklist.md`) enforces it per stage.
+Both human contributors and AI agents must follow this. `CONTRIBUTING.md` points here.
 
 ---
 
@@ -26,7 +25,7 @@ plan (`development/implementation_checklist.md`) enforces it per stage.
 5. **Clippy clean at `-D warnings`, with `clippy::pedantic` on.** Allow individual pedantic lints only
    with an inline `#[allow(clippy::…)]` **and a reason**.
 6. **Comments explain WHY, never WHAT.** (§7)
-7. **Tests drive code (TDD); coverage stays at 100%** of testable logic. (see `development/`)
+7. **Tests drive code (TDD); coverage stays at 100%** of testable logic.
 8. **Performance is a feature.** (§6)
 9. **The CLI must not make the user think.** (§8)
 
@@ -41,8 +40,7 @@ plan (`development/implementation_checklist.md`) enforces it per stage.
   `into_` (consuming). Getters are `thing()`, not `get_thing()`.
 - Iterator-producing methods are named `iter`, `iter_mut`, `into_iter`.
 - One concept per name; prefer clear over short. No Hungarian notation, no `_t` suffixes.
-- Module layout matches `development/implementation_checklist.md` → Project Structure. One responsibility
-  per module; no junk-drawer `utils.rs`.
+- One responsibility per module; no junk-drawer `utils.rs`.
 - Formatting is whatever `rustfmt` produces with the committed `rustfmt.toml`. `.editorconfig` mirrors it.
 
 ## 3. Type safety — make illegal states unrepresentable
@@ -151,5 +149,5 @@ RUSTFLAGS="--cfg coverage_nightly" cargo +nightly llvm-cov --all-features --work
 cargo deny check
 ```
 
-See `development/implementation_checklist.md` for the per-stage rhythm (recon → implement → self-review
-→ reflect) and the coverage-exclusion honesty rule.
+The working rhythm is recon → implement → self-review → reflect, with the coverage gate kept honest
+(no module-scope coverage exclusions that hide untested logic).

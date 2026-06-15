@@ -57,8 +57,8 @@ fn completions_emit_real_scripts_for_each_shell() {
             "{shell} completions should contain {needle:?}, got {stdout:?}",
         );
         assert!(
-            !stdout.contains("generated in Stage 7"),
-            "{shell} completions should not be the pre-Stage-7 placeholder",
+            !stdout.contains("placeholder"),
+            "{shell} completions should be real generated output, not a placeholder",
         );
     }
 }

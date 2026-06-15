@@ -243,7 +243,7 @@ grace = "2m"
 
 [automation]
 enabled = true
-allowed_executables = ["/usr/bin/echo", "/home/euler/bin/sync.sh"]
+allowed_executables = ["/usr/bin/echo", "/usr/local/bin/sync.sh"]
 timeout = "10m"
 
 [notify]

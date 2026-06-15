@@ -22,7 +22,7 @@ title = "Agentic sync-up"
 start = "11:30"
 duration = "30m"
 notify = "2m"
-run = ["/home/euler/bin/sync.sh", "--fast"]
+run = ["/usr/local/bin/sync.sh", "--fast"]
 status = "pending"
 "#;
 
@@ -37,7 +37,7 @@ fn parses_and_writes_design_toml_schema() {
     assert_eq!(plan.blocks[0].status, Status::Pending);
     assert_eq!(
         plan.blocks[1].run.as_ref().map(Run::as_slice),
-        Some(["/home/euler/bin/sync.sh".to_owned(), "--fast".to_owned()].as_slice())
+        Some(["/usr/local/bin/sync.sh".to_owned(), "--fast".to_owned()].as_slice())
     );
 
     let written = plan.to_toml().expect("fixture should serialize");

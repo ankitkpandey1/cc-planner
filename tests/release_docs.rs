@@ -82,7 +82,7 @@ fn cargo_manifest_declares_release_metadata() {
         authors.iter().any(|author| {
             author
                 .as_str()
-                .is_some_and(|value| value.contains("ankitpandey"))
+                .is_some_and(|value| value.contains("Ankit Pandey"))
         })
     }));
 
@@ -188,8 +188,11 @@ fn release_workflows_and_badges_are_real() {
 
     let readme = read_repo_file("README.md");
     assert!(readme.contains("actions/workflows/ci.yml/badge.svg"));
-    assert!(readme.contains("codecov.io/gh/ankitkpandey1/cc-planner"));
+    // The crates.io badge resolves once the release pipeline publishes the crate. The codecov
+    // badge is intentionally omitted: it requires manually activating the repo on codecov.io and
+    // would otherwise render as "unknown" on a fresh public repo.
     assert!(readme.contains("img.shields.io/crates/v/ccplan"));
+    assert!(!readme.contains("codecov.io"));
     assert!(!readme.contains("CI-pending"));
     assert!(!readme.contains("crates.io-unpublished"));
 }

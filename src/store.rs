@@ -407,10 +407,23 @@ fn lock_file(file: File, lock_path: PathBuf) -> Result<StoreLock, StoreError> {
 
 #[cfg_attr(coverage_nightly, coverage(off))]
 fn is_lock_contention(error: &io::Error) -> bool {
-    matches!(
+    if matches!(
         error.kind(),
         io::ErrorKind::WouldBlock | io::ErrorKind::PermissionDenied
-    ) || matches!(error.raw_os_error(), Some(32 | 33))
+    ) {
+        return true;
+    }
+    // On Windows an exclusive-lock conflict surfaces as a raw OS error rather than a mapped
+    // ErrorKind: ERROR_SHARING_VIOLATION (32) or ERROR_LOCK_VIOLATION (33). These codes are
+    // Windows-specific, so only consult them there — on Unix 32/33 are unrelated errno values.
+    #[cfg(windows)]
+    {
+        matches!(error.raw_os_error(), Some(32 | 33))
+    }
+    #[cfg(not(windows))]
+    {
+        false
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

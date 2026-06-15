@@ -1,7 +1,7 @@
 # ccplan — Design Doc
 
 **App / binary name:** `ccplan`  ·  **Repo:** `cc-planner`
-**Author:** ankitpandey@mammoth.io
+**Author:** Ankit Pandey <itsankitkp@gmail.com>
 **Implementation language:** Rust · **Targets:** Linux, macOS, Windows (cross-platform CLI)
 
 ---
@@ -193,7 +193,7 @@ title    = "Agentic sync-up"
 start    = "11:30"
 duration = "30m"
 notify   = "2m"
-run      = ["/home/euler/bin/sync.sh", "--fast"]   # argv vector — no shell (NG9, §9)
+run      = ["/usr/local/bin/sync.sh", "--fast"]   # argv vector — no shell (NG9, §9)
 status   = "pending"
 ```
 

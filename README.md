@@ -5,7 +5,6 @@
 **A plain-text, agent-fillable day planner that notifies you, tracks block status, and runs commands at the right time.**
 
 [![CI](https://github.com/ankitkpandey1/cc-planner/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/ankitkpandey1/cc-planner/actions/workflows/ci.yml)
-[![coverage](https://codecov.io/gh/ankitkpandey1/cc-planner/branch/main/graph/badge.svg)](https://codecov.io/gh/ankitkpandey1/cc-planner)
 [![crates.io](https://img.shields.io/crates/v/ccplan.svg)](https://crates.io/crates/ccplan)
 [![license](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)](#license)
 
@@ -323,7 +322,7 @@ cargo build --release
 Contributions welcome! See [`CONTRIBUTING.md`](CONTRIBUTING.md) and the coding standard in
 [`CONVENTIONS.md`](CONVENTIONS.md). In short: conventional-commit messages, `cargo fmt` +
 `cargo clippy -- -D warnings` clean, no `unsafe`, tests for every change, and the coverage gate stays
-at 100%. Development planning docs live in [`development/`](development/).
+at 100%.
 
 ## License
 
