@@ -12,7 +12,7 @@ use jiff::SignedDuration;
 use serde_json::{Value, json};
 
 use crate::{
-    cli::{ApplyArgs, Commands, ReadArgs},
+    cli::{AddArgs, AgendaArgs, ApplyArgs, BlockTarget, Commands, EditArgs, ReadArgs, RemindArgs},
     commands::{self, set_from_str, slug_block_id},
     config::Config,
     context::ContextRefs,
@@ -207,6 +207,14 @@ fn call_tool(name: &str, args: &Value, context: &ContextRefs<'_>) -> Value {
         "ccplan_plan_day" => invoke_plan_day(args, context),
         "ccplan_apply" => invoke_apply(args, context),
         "ccplan_show_plan" => invoke_show_plan(args, context),
+        "ccplan_list_now" => invoke_list_now(args, context),
+        "ccplan_list_next" => invoke_list_next(args, context),
+        "ccplan_show_agenda" => invoke_show_agenda(args, context),
+        "ccplan_add_block" => invoke_add_block(args, context),
+        "ccplan_add_reminder" => invoke_add_reminder(args, context),
+        "ccplan_mark_block" => invoke_mark_block(args, context),
+        "ccplan_edit_block" => invoke_edit_block(args, context),
+        "ccplan_remove_block" => invoke_remove_block(args, context),
         _ => tool_error(&json!({
             "error": "unknown_tool",
             "message": format!("unknown tool: {name}"),
@@ -288,6 +296,280 @@ fn invoke_show_plan(args: &Value, context: &ContextRefs<'_>) -> Value {
         Ok(()) => tool_ok(&String::from_utf8_lossy(&out)),
         Err(e) => tool_error_from_err(&e),
     }
+}
+
+fn invoke_list_now(args: &Value, context: &ContextRefs<'_>) -> Value {
+    let cmd = Commands::Now(ReadArgs {
+        date: extract_date(args),
+        json: true,
+    });
+    invoke_read_cmd(cmd, context)
+}
+
+fn invoke_list_next(args: &Value, context: &ContextRefs<'_>) -> Value {
+    let cmd = Commands::Next(ReadArgs {
+        date: extract_date(args),
+        json: true,
+    });
+    invoke_read_cmd(cmd, context)
+}
+
+fn invoke_show_agenda(args: &Value, context: &ContextRefs<'_>) -> Value {
+    let cmd = Commands::Agenda(AgendaArgs {
+        date: extract_date(args),
+        json: true,
+    });
+    invoke_read_cmd(cmd, context)
+}
+
+/// Shared dispatch for the three read list commands; maps `NotFound` to an empty JSON array.
+fn invoke_read_cmd(cmd: Commands, context: &ContextRefs<'_>) -> Value {
+    let mut out = Vec::new();
+    match commands::dispatch(Some(cmd), &mut out, context) {
+        Ok(()) => tool_ok(&String::from_utf8_lossy(&out)),
+        Err(Error::NotFound(_)) => tool_ok("[]\n"),
+        Err(e) => tool_error_from_err(&e),
+    }
+}
+
+fn invoke_add_block(args: &Value, context: &ContextRefs<'_>) -> Value {
+    match add_block_inner(args, context) {
+        Ok(text) => tool_ok(&text),
+        Err(e) => tool_error_from_err(&e),
+    }
+}
+
+fn add_block_inner(args: &Value, context: &ContextRefs<'_>) -> Result<String> {
+    let title = args
+        .get("title")
+        .and_then(Value::as_str)
+        .ok_or_else(|| Error::Usage("add_block requires 'title'".to_owned()))?
+        .to_owned();
+    let start: ClockTime = args
+        .get("start")
+        .and_then(Value::as_str)
+        .ok_or_else(|| Error::Usage("add_block requires 'start'".to_owned()))?
+        .parse()
+        .map_err(Error::from)?;
+    let end: Option<ClockTime> = args
+        .get("end")
+        .and_then(Value::as_str)
+        .map(|s| s.parse().map_err(Error::from))
+        .transpose()?;
+    let duration: Option<DurationSpec> = args
+        .get("duration")
+        .and_then(Value::as_str)
+        .map(|s| s.parse().map_err(Error::from))
+        .transpose()?;
+    match (&end, &duration) {
+        (Some(_), Some(_)) => {
+            return Err(Error::Usage(
+                "add_block: set exactly one of 'end' or 'duration'".to_owned(),
+            ));
+        }
+        (None, None) => {
+            return Err(Error::Usage(
+                "add_block: set 'end' or 'duration'".to_owned(),
+            ));
+        }
+        _ => {}
+    }
+    let notify: Option<Lead> = args
+        .get("notify")
+        .and_then(Value::as_str)
+        .map(|s| s.parse().map_err(Error::from))
+        .transpose()?;
+    let id: Option<BlockId> = args
+        .get("id")
+        .and_then(Value::as_str)
+        .map(|s| s.parse().map_err(Error::from))
+        .transpose()?;
+    let tags: Vec<String> = args
+        .get("tags")
+        .and_then(Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default();
+    let run: Vec<String> = args
+        .get("run")
+        .and_then(Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default();
+    let date = extract_date(args);
+    let apply = args.get("apply").and_then(Value::as_bool).unwrap_or(false);
+    let add_args = AddArgs {
+        date: date.clone(),
+        id,
+        title,
+        start,
+        end,
+        duration,
+        notify,
+        tags,
+        run,
+    };
+    let mut out = Vec::new();
+    commands::dispatch(Some(Commands::Add(add_args)), &mut out, context)?;
+    if apply {
+        let apply_cmd = Some(Commands::Apply(ApplyArgs {
+            date,
+            dry_run: false,
+        }));
+        commands::dispatch(apply_cmd, &mut out, context)?;
+    }
+    let text = String::from_utf8_lossy(&out).into_owned();
+    if text.is_empty() {
+        Ok("block added".to_owned())
+    } else {
+        Ok(text)
+    }
+}
+
+fn invoke_add_reminder(args: &Value, context: &ContextRefs<'_>) -> Value {
+    match add_reminder_inner(args, context) {
+        Ok(text) => tool_ok(&text),
+        Err(e) => tool_error_from_err(&e),
+    }
+}
+
+fn add_reminder_inner(args: &Value, context: &ContextRefs<'_>) -> Result<String> {
+    let text = args
+        .get("text")
+        .and_then(Value::as_str)
+        .ok_or_else(|| Error::Usage("add_reminder requires 'text'".to_owned()))?
+        .to_owned();
+    let fire_in: DurationSpec = args
+        .get("in_duration")
+        .and_then(Value::as_str)
+        .ok_or_else(|| Error::Usage("add_reminder requires 'in_duration'".to_owned()))?
+        .parse()
+        .map_err(Error::from)?;
+    let id: Option<BlockId> = args
+        .get("id")
+        .and_then(Value::as_str)
+        .map(|s| s.parse().map_err(Error::from))
+        .transpose()?;
+    let mut out = Vec::new();
+    let remind_cmd = Some(Commands::Remind(RemindArgs { text, fire_in, id }));
+    commands::dispatch(remind_cmd, &mut out, context)?;
+    Ok(String::from_utf8_lossy(&out).into_owned())
+}
+
+fn invoke_mark_block(args: &Value, context: &ContextRefs<'_>) -> Value {
+    match mark_block_inner(args, context) {
+        Ok(()) => tool_ok("block marked"),
+        Err(e) => tool_error_from_err(&e),
+    }
+}
+
+fn mark_block_inner(args: &Value, context: &ContextRefs<'_>) -> Result<()> {
+    let id: BlockId = args
+        .get("id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| Error::Usage("mark_block requires 'id'".to_owned()))?
+        .parse()
+        .map_err(Error::from)?;
+    let status_str = args
+        .get("status")
+        .and_then(Value::as_str)
+        .ok_or_else(|| Error::Usage("mark_block requires 'status'".to_owned()))?;
+    let cmd = match status_str {
+        "done" => Commands::Done(BlockTarget { id }),
+        "skipped" => Commands::Skip(BlockTarget { id }),
+        other => {
+            return Err(Error::Usage(format!(
+                "mark_block: status must be 'done' or 'skipped', got '{other}'"
+            )));
+        }
+    };
+    let mut out = Vec::new();
+    commands::dispatch(Some(cmd), &mut out, context)
+}
+
+fn invoke_edit_block(args: &Value, context: &ContextRefs<'_>) -> Value {
+    match edit_block_inner(args, context) {
+        Ok(()) => tool_ok("block updated"),
+        Err(e) => tool_error_from_err(&e),
+    }
+}
+
+fn edit_block_inner(args: &Value, context: &ContextRefs<'_>) -> Result<()> {
+    let id: BlockId = args
+        .get("id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| Error::Usage("edit_block requires 'id'".to_owned()))?
+        .parse()
+        .map_err(Error::from)?;
+    let title: Option<String> = args.get("title").and_then(Value::as_str).map(str::to_owned);
+    let start: Option<ClockTime> = args
+        .get("start")
+        .and_then(Value::as_str)
+        .map(|s| s.parse().map_err(Error::from))
+        .transpose()?;
+    let end: Option<ClockTime> = args
+        .get("end")
+        .and_then(Value::as_str)
+        .map(|s| s.parse().map_err(Error::from))
+        .transpose()?;
+    let duration: Option<DurationSpec> = args
+        .get("duration")
+        .and_then(Value::as_str)
+        .map(|s| s.parse().map_err(Error::from))
+        .transpose()?;
+    let notify: Option<Lead> = args
+        .get("notify")
+        .and_then(Value::as_str)
+        .map(|s| s.parse().map_err(Error::from))
+        .transpose()?;
+    let run: Vec<String> = args
+        .get("run")
+        .and_then(Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect()
+        })
+        .unwrap_or_default();
+    let edit_args = EditArgs {
+        id,
+        date: extract_date(args),
+        title,
+        start,
+        end,
+        duration,
+        notify,
+        run,
+    };
+    let mut out = Vec::new();
+    commands::dispatch(Some(Commands::Edit(edit_args)), &mut out, context)
+}
+
+fn invoke_remove_block(args: &Value, context: &ContextRefs<'_>) -> Value {
+    match remove_block_inner(args, context) {
+        Ok(()) => tool_ok("block removed"),
+        Err(e) => tool_error_from_err(&e),
+    }
+}
+
+fn remove_block_inner(args: &Value, context: &ContextRefs<'_>) -> Result<()> {
+    let id: BlockId = args
+        .get("id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| Error::Usage("remove_block requires 'id'".to_owned()))?
+        .parse()
+        .map_err(Error::from)?;
+    let mut out = Vec::new();
+    commands::dispatch(Some(Commands::Rm(BlockTarget { id })), &mut out, context)
 }
 
 // ── Tool result helpers ───────────────────────────────────────────────────────
@@ -458,7 +740,19 @@ fn parse_mcp_block(val: &Value, index: usize, default_lead: Lead) -> Result<Bloc
 // ── Tool catalog ──────────────────────────────────────────────────────────────
 
 fn tool_catalog() -> Vec<Value> {
-    vec![plan_day_schema(), apply_schema(), show_plan_schema()]
+    vec![
+        plan_day_schema(),
+        apply_schema(),
+        show_plan_schema(),
+        list_now_schema(),
+        list_next_schema(),
+        show_agenda_schema(),
+        add_block_schema(),
+        add_reminder_schema(),
+        mark_block_schema(),
+        edit_block_schema(),
+        remove_block_schema(),
+    ]
 }
 
 fn plan_day_schema() -> Value {
@@ -558,6 +852,148 @@ fn show_plan_schema() -> Value {
                     "description": "ISO date YYYY-MM-DD. Defaults to today."
                 }
             }
+        }
+    })
+}
+
+fn list_now_schema() -> Value {
+    json!({
+        "name": "ccplan_list_now",
+        "description": "Return blocks that are currently active (started but not yet ended). Returns [] when no plan exists or no block is active right now.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "date": {"type": "string", "description": "ISO date YYYY-MM-DD. Defaults to today."}
+            }
+        }
+    })
+}
+
+fn list_next_schema() -> Value {
+    json!({
+        "name": "ccplan_list_next",
+        "description": "Return the next upcoming block(s) — all blocks starting at the same nearest future time. Returns [] when no plan exists or nothing is coming up today.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "date": {"type": "string", "description": "ISO date YYYY-MM-DD. Defaults to today."}
+            }
+        }
+    })
+}
+
+fn show_agenda_schema() -> Value {
+    json!({
+        "name": "ccplan_show_agenda",
+        "description": "Return all non-terminal blocks whose end time has not yet passed, ordered by start time. Returns [] when no plan exists or the day is complete.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "date": {"type": "string", "description": "ISO date YYYY-MM-DD. Defaults to today."}
+            }
+        }
+    })
+}
+
+fn add_block_schema() -> Value {
+    json!({
+        "name": "ccplan_add_block",
+        "description": "Add or replace a single block in the day's plan. Set exactly one of 'end' or 'duration'. Call ccplan_apply to take effect.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "title": {"type": "string", "description": "Block title."},
+                "start": {"type": "string", "description": "Start time HH:MM (24-hour)."},
+                "end": {"type": "string", "description": "End time HH:MM. Set exactly one of end or duration."},
+                "duration": {"type": "string", "description": "Duration e.g. '30m', '1h30m'. Set exactly one of end or duration."},
+                "notify": {"type": "string", "description": "Notification lead e.g. '5m'. Defaults to config default_lead."},
+                "id": {"type": "string", "description": "Block ID. Auto-generated from title if omitted."},
+                "date": {"type": "string", "description": "ISO date YYYY-MM-DD. Defaults to today."},
+                "tags": {"type": "array", "items": {"type": "string"}},
+                "run": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "argv to execute at block start. argv[0] must be absolute and allowlisted."
+                },
+                "apply": {
+                    "type": "boolean",
+                    "description": "If true, also run ccplan_apply after adding. Default false."
+                }
+            },
+            "required": ["title", "start"]
+        }
+    })
+}
+
+fn add_reminder_schema() -> Value {
+    json!({
+        "name": "ccplan_add_reminder",
+        "description": "Set a one-shot OS notification to fire in a given duration from now, then apply immediately.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "text": {"type": "string", "description": "Reminder text shown in the notification."},
+                "in_duration": {
+                    "type": "string",
+                    "description": "Duration until the reminder fires, e.g. '30m', '1h', '2h30m'."
+                },
+                "id": {"type": "string", "description": "Block ID. Auto-generated from text if omitted."}
+            },
+            "required": ["text", "in_duration"]
+        }
+    })
+}
+
+fn mark_block_schema() -> Value {
+    json!({
+        "name": "ccplan_mark_block",
+        "description": "Mark a block done or skipped. Note: missed and expired are system-assigned. Call ccplan_apply to take effect.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "id": {"type": "string", "description": "Block ID."},
+                "status": {
+                    "type": "string",
+                    "enum": ["done", "skipped"],
+                    "description": "New status. Only 'done' and 'skipped' may be set manually."
+                }
+            },
+            "required": ["id", "status"]
+        }
+    })
+}
+
+fn edit_block_schema() -> Value {
+    json!({
+        "name": "ccplan_edit_block",
+        "description": "Edit fields of an existing non-terminal block. Set at most one of 'end' or 'duration'. Call ccplan_apply to take effect.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "id": {"type": "string", "description": "Block ID to edit."},
+                "date": {"type": "string", "description": "ISO date YYYY-MM-DD. Defaults to today."},
+                "title": {"type": "string"},
+                "start": {"type": "string", "description": "Start time HH:MM."},
+                "end": {"type": "string", "description": "End time HH:MM."},
+                "duration": {"type": "string", "description": "Duration e.g. '30m'."},
+                "notify": {"type": "string", "description": "Notification lead e.g. '5m'."},
+                "run": {"type": "array", "items": {"type": "string"}}
+            },
+            "required": ["id"]
+        }
+    })
+}
+
+fn remove_block_schema() -> Value {
+    json!({
+        "name": "ccplan_remove_block",
+        "description": "Remove a non-terminal block from today's plan. Call ccplan_apply to take effect.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "id": {"type": "string", "description": "Block ID to remove."}
+            },
+            "required": ["id"]
         }
     })
 }
@@ -1256,5 +1692,671 @@ mod tests {
         );
         let responses = run_serve(&context, input.as_bytes());
         assert_eq!(responses[0]["result"]["isError"], false);
+    }
+
+    // ── M3: list_now / list_next / show_agenda ─────────────────────────────────
+
+    #[test]
+    fn list_now_returns_empty_array_when_no_plan() {
+        let (_temp, context) = test_context();
+        let input = req(
+            1,
+            "tools/call",
+            json!({"name": "ccplan_list_now", "arguments": {}}),
+        );
+        let responses = run_serve(&context, input.as_bytes());
+        assert_eq!(responses[0]["result"]["isError"], false);
+        let text = responses[0]["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap();
+        assert_eq!(text.trim(), "[]");
+    }
+
+    #[test]
+    fn list_now_returns_active_block() {
+        let (_temp, context) = test_context();
+        // Clock is at 10:00; create a block 10:00–11:00 (starts exactly now → active).
+        let plan_input = req(
+            1,
+            "tools/call",
+            json!({"name": "ccplan_plan_day", "arguments": {
+                "date": "2026-06-08",
+                "timezone": "Asia/Kolkata",
+                "blocks": [{"title": "Now Block", "start": "10:00", "end": "11:00"}]
+            }}),
+        );
+        let list_input = req(
+            2,
+            "tools/call",
+            json!({"name": "ccplan_list_now", "arguments": {"date": "2026-06-08"}}),
+        );
+        let input = format!("{plan_input}{list_input}");
+        let responses = run_serve(&context, input.as_bytes());
+        assert_eq!(responses[1]["result"]["isError"], false);
+        let text = responses[1]["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap();
+        let arr: Value = serde_json::from_str(text.trim()).unwrap();
+        assert_eq!(arr.as_array().unwrap().len(), 1);
+        assert_eq!(arr[0]["id"], "now-block");
+    }
+
+    #[test]
+    fn list_now_with_corrupt_plan_returns_iserror() {
+        let (_temp, context) = test_context();
+        let date = "2026-06-08".parse::<PlanDate>().unwrap();
+        let plan_path = context.store.plan_path(&date);
+        std::fs::create_dir_all(plan_path.parent().unwrap()).unwrap();
+        std::fs::write(&plan_path, b"[[[not valid toml").unwrap();
+        let input = req(
+            1,
+            "tools/call",
+            json!({"name": "ccplan_list_now", "arguments": {"date": "2026-06-08"}}),
+        );
+        let responses = run_serve(&context, input.as_bytes());
+        assert_eq!(responses[0]["result"]["isError"], true);
+    }
+
+    #[test]
+    fn list_next_returns_empty_array_when_no_plan() {
+        let (_temp, context) = test_context();
+        let input = req(
+            1,
+            "tools/call",
+            json!({"name": "ccplan_list_next", "arguments": {}}),
+        );
+        let responses = run_serve(&context, input.as_bytes());
+        assert_eq!(responses[0]["result"]["isError"], false);
+        let text = responses[0]["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap();
+        assert_eq!(text.trim(), "[]");
+    }
+
+    #[test]
+    fn list_next_returns_upcoming_block() {
+        let (_temp, context) = test_context();
+        // Clock at 10:00; block starts at 11:00 (future).
+        let plan_input = req(
+            1,
+            "tools/call",
+            json!({"name": "ccplan_plan_day", "arguments": {
+                "date": "2026-06-08",
+                "timezone": "Asia/Kolkata",
+                "blocks": [{"title": "Next Block", "start": "11:00", "end": "11:30"}]
+            }}),
+        );
+        let list_input = req(
+            2,
+            "tools/call",
+            json!({"name": "ccplan_list_next", "arguments": {"date": "2026-06-08"}}),
+        );
+        let input = format!("{plan_input}{list_input}");
+        let responses = run_serve(&context, input.as_bytes());
+        assert_eq!(responses[1]["result"]["isError"], false);
+        let text = responses[1]["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap();
+        let arr: Value = serde_json::from_str(text.trim()).unwrap();
+        assert_eq!(arr.as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn show_agenda_returns_empty_array_when_no_plan() {
+        let (_temp, context) = test_context();
+        let input = req(
+            1,
+            "tools/call",
+            json!({"name": "ccplan_show_agenda", "arguments": {}}),
+        );
+        let responses = run_serve(&context, input.as_bytes());
+        assert_eq!(responses[0]["result"]["isError"], false);
+        let text = responses[0]["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap();
+        assert_eq!(text.trim(), "[]");
+    }
+
+    #[test]
+    fn show_agenda_returns_upcoming_entries() {
+        let (_temp, context) = test_context();
+        let plan_input = req(
+            1,
+            "tools/call",
+            json!({"name": "ccplan_plan_day", "arguments": {
+                "date": "2026-06-08",
+                "timezone": "Asia/Kolkata",
+                "blocks": [{"title": "Agenda Block", "start": "11:00", "end": "12:00"}]
+            }}),
+        );
+        let agenda_input = req(
+            2,
+            "tools/call",
+            json!({"name": "ccplan_show_agenda", "arguments": {"date": "2026-06-08"}}),
+        );
+        let input = format!("{plan_input}{agenda_input}");
+        let responses = run_serve(&context, input.as_bytes());
+        assert_eq!(responses[1]["result"]["isError"], false);
+        let text = responses[1]["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap();
+        let arr: Value = serde_json::from_str(text.trim()).unwrap();
+        assert!(!arr.as_array().unwrap().is_empty());
+    }
+
+    // ── M3: add_block ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn add_block_creates_block_on_plan() {
+        let (_temp, context) = test_context();
+        // First create a plan, then add a block.
+        let plan_input = req(
+            1,
+            "tools/call",
+            json!({"name": "ccplan_plan_day", "arguments": {
+                "date": "2026-06-08", "timezone": "Asia/Kolkata",
+                "blocks": [{"title": "First", "start": "09:00", "end": "09:30"}]
+            }}),
+        );
+        let add_input = req(
+            2,
+            "tools/call",
+            json!({"name": "ccplan_add_block", "arguments": {
+                "date": "2026-06-08",
+                "title": "Added Block", "start": "10:00", "end": "10:30"
+            }}),
+        );
+        let input = format!("{plan_input}{add_input}");
+        let responses = run_serve(&context, input.as_bytes());
+        assert_eq!(responses[1]["result"]["isError"], false);
+        let stored = context
+            .store
+            .load_plan(&"2026-06-08".parse::<PlanDate>().unwrap())
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.blocks.len(), 2);
+    }
+
+    #[test]
+    fn add_block_with_apply_triggers_scheduler() {
+        let (_temp, context) = test_context();
+        let plan_input = req(
+            1,
+            "tools/call",
+            json!({"name": "ccplan_plan_day", "arguments": {
+                "date": "2026-06-08", "timezone": "Asia/Kolkata",
+                "blocks": [{"title": "Seed", "start": "09:00", "end": "09:30"}]
+            }}),
+        );
+        let add_input = req(
+            2,
+            "tools/call",
+            json!({"name": "ccplan_add_block", "arguments": {
+                "date": "2026-06-08",
+                "title": "Applied Block", "start": "11:00", "end": "11:30", "apply": true
+            }}),
+        );
+        let input = format!("{plan_input}{add_input}");
+        let responses = run_serve(&context, input.as_bytes());
+        assert_eq!(responses[1]["result"]["isError"], false);
+        // apply output is present in the text
+        let text = responses[1]["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap();
+        assert!(!text.is_empty());
+    }
+
+    #[test]
+    fn add_block_missing_title_returns_iserror() {
+        let (_temp, context) = test_context();
+        let input = req(
+            1,
+            "tools/call",
+            json!({"name": "ccplan_add_block",
+            "arguments": {"start": "09:00", "end": "10:00"}}),
+        );
+        let responses = run_serve(&context, input.as_bytes());
+        assert_eq!(responses[0]["result"]["isError"], true);
+    }
+
+    #[test]
+    fn add_block_missing_start_returns_iserror() {
+        let (_temp, context) = test_context();
+        let input = req(
+            1,
+            "tools/call",
+            json!({"name": "ccplan_add_block",
+            "arguments": {"title": "X", "end": "10:00"}}),
+        );
+        let responses = run_serve(&context, input.as_bytes());
+        assert_eq!(responses[0]["result"]["isError"], true);
+    }
+
+    #[test]
+    fn add_block_missing_end_and_duration_returns_iserror() {
+        let (_temp, context) = test_context();
+        let input = req(
+            1,
+            "tools/call",
+            json!({"name": "ccplan_add_block",
+            "arguments": {"title": "X", "start": "09:00"}}),
+        );
+        let responses = run_serve(&context, input.as_bytes());
+        assert_eq!(responses[0]["result"]["isError"], true);
+    }
+
+    #[test]
+    fn add_block_both_end_and_duration_returns_iserror() {
+        let (_temp, context) = test_context();
+        let input = req(
+            1,
+            "tools/call",
+            json!({"name": "ccplan_add_block",
+            "arguments": {"title": "X", "start": "09:00", "end": "10:00", "duration": "30m"}}),
+        );
+        let responses = run_serve(&context, input.as_bytes());
+        assert_eq!(responses[0]["result"]["isError"], true);
+    }
+
+    // ── M3: add_reminder ───────────────────────────────────────────────────────
+
+    #[test]
+    fn add_reminder_sets_reminder_and_applies() {
+        let (_temp, context) = test_context();
+        let input = req(
+            1,
+            "tools/call",
+            json!({"name": "ccplan_add_reminder",
+            "arguments": {"text": "Check in", "in_duration": "1h"}}),
+        );
+        let responses = run_serve(&context, input.as_bytes());
+        assert_eq!(responses[0]["result"]["isError"], false);
+        let text = responses[0]["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap();
+        assert!(text.contains("Check in"));
+    }
+
+    #[test]
+    fn add_reminder_missing_text_returns_iserror() {
+        let (_temp, context) = test_context();
+        let input = req(
+            1,
+            "tools/call",
+            json!({"name": "ccplan_add_reminder",
+            "arguments": {"in_duration": "1h"}}),
+        );
+        let responses = run_serve(&context, input.as_bytes());
+        assert_eq!(responses[0]["result"]["isError"], true);
+    }
+
+    #[test]
+    fn add_reminder_missing_in_duration_returns_iserror() {
+        let (_temp, context) = test_context();
+        let input = req(
+            1,
+            "tools/call",
+            json!({"name": "ccplan_add_reminder",
+            "arguments": {"text": "X"}}),
+        );
+        let responses = run_serve(&context, input.as_bytes());
+        assert_eq!(responses[0]["result"]["isError"], true);
+    }
+
+    // ── M3: mark_block ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn mark_block_done_succeeds() {
+        let (_temp, context) = test_context();
+        let plan_input = req(
+            1,
+            "tools/call",
+            json!({"name": "ccplan_plan_day", "arguments": {
+                "date": "2026-06-08", "timezone": "Asia/Kolkata",
+                "blocks": [{"id": "my-task", "title": "Task", "start": "09:00", "end": "09:30"}]
+            }}),
+        );
+        let mark_input = req(
+            2,
+            "tools/call",
+            json!({"name": "ccplan_mark_block",
+            "arguments": {"id": "my-task", "status": "done"}}),
+        );
+        let input = format!("{plan_input}{mark_input}");
+        let responses = run_serve(&context, input.as_bytes());
+        assert_eq!(responses[1]["result"]["isError"], false);
+        let stored = context
+            .store
+            .load_plan(&"2026-06-08".parse::<PlanDate>().unwrap())
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.blocks[0].status, Status::Done);
+    }
+
+    #[test]
+    fn mark_block_skipped_succeeds() {
+        let (_temp, context) = test_context();
+        let plan_input = req(
+            1,
+            "tools/call",
+            json!({"name": "ccplan_plan_day", "arguments": {
+                "date": "2026-06-08", "timezone": "Asia/Kolkata",
+                "blocks": [{"id": "task-b", "title": "Task B", "start": "10:00", "end": "10:30"}]
+            }}),
+        );
+        let mark_input = req(
+            2,
+            "tools/call",
+            json!({"name": "ccplan_mark_block",
+            "arguments": {"id": "task-b", "status": "skipped"}}),
+        );
+        let input = format!("{plan_input}{mark_input}");
+        let responses = run_serve(&context, input.as_bytes());
+        assert_eq!(responses[1]["result"]["isError"], false);
+    }
+
+    #[test]
+    fn mark_block_invalid_status_returns_iserror() {
+        let (_temp, context) = test_context();
+        let input = req(
+            1,
+            "tools/call",
+            json!({"name": "ccplan_mark_block",
+            "arguments": {"id": "x", "status": "missed"}}),
+        );
+        let responses = run_serve(&context, input.as_bytes());
+        assert_eq!(responses[0]["result"]["isError"], true);
+    }
+
+    #[test]
+    fn mark_block_missing_id_returns_iserror() {
+        let (_temp, context) = test_context();
+        let input = req(
+            1,
+            "tools/call",
+            json!({"name": "ccplan_mark_block",
+            "arguments": {"status": "done"}}),
+        );
+        let responses = run_serve(&context, input.as_bytes());
+        assert_eq!(responses[0]["result"]["isError"], true);
+    }
+
+    #[test]
+    fn mark_block_missing_status_returns_iserror() {
+        let (_temp, context) = test_context();
+        let input = req(
+            1,
+            "tools/call",
+            json!({"name": "ccplan_mark_block",
+            "arguments": {"id": "x"}}),
+        );
+        let responses = run_serve(&context, input.as_bytes());
+        assert_eq!(responses[0]["result"]["isError"], true);
+    }
+
+    // ── M3: edit_block ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn edit_block_updates_title() {
+        let (_temp, context) = test_context();
+        let plan_input = req(
+            1,
+            "tools/call",
+            json!({"name": "ccplan_plan_day", "arguments": {
+                "date": "2026-06-08", "timezone": "Asia/Kolkata",
+                "blocks": [{"id": "edit-me", "title": "Old Title", "start": "09:00", "end": "09:30"}]
+            }}),
+        );
+        let edit_input = req(
+            2,
+            "tools/call",
+            json!({"name": "ccplan_edit_block",
+            "arguments": {"id": "edit-me", "date": "2026-06-08", "title": "New Title"}}),
+        );
+        let input = format!("{plan_input}{edit_input}");
+        let responses = run_serve(&context, input.as_bytes());
+        assert_eq!(responses[1]["result"]["isError"], false);
+        let stored = context
+            .store
+            .load_plan(&"2026-06-08".parse::<PlanDate>().unwrap())
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.blocks[0].title, "New Title");
+    }
+
+    #[test]
+    fn edit_block_missing_id_returns_iserror() {
+        let (_temp, context) = test_context();
+        let input = req(
+            1,
+            "tools/call",
+            json!({"name": "ccplan_edit_block",
+            "arguments": {"title": "X"}}),
+        );
+        let responses = run_serve(&context, input.as_bytes());
+        assert_eq!(responses[0]["result"]["isError"], true);
+    }
+
+    #[test]
+    fn edit_block_not_found_returns_iserror() {
+        let (_temp, context) = test_context();
+        let plan_input = req(
+            1,
+            "tools/call",
+            json!({"name": "ccplan_plan_day", "arguments": {
+                "date": "2026-06-08", "timezone": "Asia/Kolkata",
+                "blocks": [{"title": "Seed", "start": "09:00", "end": "09:30"}]
+            }}),
+        );
+        let edit_input = req(
+            2,
+            "tools/call",
+            json!({"name": "ccplan_edit_block",
+            "arguments": {"id": "no-such-block", "date": "2026-06-08", "title": "X"}}),
+        );
+        let input = format!("{plan_input}{edit_input}");
+        let responses = run_serve(&context, input.as_bytes());
+        assert_eq!(responses[1]["result"]["isError"], true);
+    }
+
+    // ── M3: remove_block ───────────────────────────────────────────────────────
+
+    #[test]
+    fn remove_block_deletes_block() {
+        let (_temp, context) = test_context();
+        let plan_input = req(
+            1,
+            "tools/call",
+            json!({"name": "ccplan_plan_day", "arguments": {
+                "date": "2026-06-08", "timezone": "Asia/Kolkata",
+                "blocks": [{"id": "rm-me", "title": "Remove Me", "start": "09:00", "end": "09:30"}]
+            }}),
+        );
+        let rm_input = req(
+            2,
+            "tools/call",
+            json!({"name": "ccplan_remove_block",
+            "arguments": {"id": "rm-me"}}),
+        );
+        let input = format!("{plan_input}{rm_input}");
+        let responses = run_serve(&context, input.as_bytes());
+        assert_eq!(responses[1]["result"]["isError"], false);
+        let stored = context
+            .store
+            .load_plan(&"2026-06-08".parse::<PlanDate>().unwrap())
+            .unwrap()
+            .unwrap();
+        assert!(stored.blocks.is_empty());
+    }
+
+    #[test]
+    fn remove_block_missing_id_returns_iserror() {
+        let (_temp, context) = test_context();
+        let input = req(
+            1,
+            "tools/call",
+            json!({"name": "ccplan_remove_block",
+            "arguments": {}}),
+        );
+        let responses = run_serve(&context, input.as_bytes());
+        assert_eq!(responses[0]["result"]["isError"], true);
+    }
+
+    #[test]
+    fn remove_block_not_found_returns_iserror() {
+        let (_temp, context) = test_context();
+        let plan_input = req(
+            1,
+            "tools/call",
+            json!({"name": "ccplan_plan_day", "arguments": {
+                "date": "2026-06-08", "timezone": "Asia/Kolkata",
+                "blocks": [{"title": "Seed", "start": "09:00", "end": "09:30"}]
+            }}),
+        );
+        let rm_input = req(
+            2,
+            "tools/call",
+            json!({"name": "ccplan_remove_block",
+            "arguments": {"id": "no-such-block"}}),
+        );
+        let input = format!("{plan_input}{rm_input}");
+        let responses = run_serve(&context, input.as_bytes());
+        assert_eq!(responses[1]["result"]["isError"], true);
+    }
+
+    #[test]
+    fn add_block_with_notify_id_tags_run_covers_optional_closures() {
+        let (_temp, context) = test_context();
+        let plan_input = req(
+            1,
+            "tools/call",
+            json!({"name": "ccplan_plan_day", "arguments": {
+                "date": "2026-06-08", "timezone": "Asia/Kolkata",
+                "blocks": [{"title": "Seed", "start": "09:00", "end": "09:30"}]
+            }}),
+        );
+        let add_input = req(
+            2,
+            "tools/call",
+            json!({"name": "ccplan_add_block", "arguments": {
+                "date": "2026-06-08",
+                "id": "custom-id",
+                "title": "Full Block",
+                "start": "11:00",
+                "end": "12:00",
+                "notify": "5m",
+                "tags": ["work", "focus"],
+                "run": ["/usr/bin/echo", "hello"]
+            }}),
+        );
+        let input = format!("{plan_input}{add_input}");
+        let responses = run_serve(&context, input.as_bytes());
+        assert_eq!(responses[1]["result"]["isError"], false);
+        let stored = context
+            .store
+            .load_plan(&"2026-06-08".parse::<PlanDate>().unwrap())
+            .unwrap()
+            .unwrap();
+        let added = stored
+            .blocks
+            .iter()
+            .find(|b| b.id.as_str() == "custom-id")
+            .unwrap();
+        assert_eq!(added.tags, vec!["work", "focus"]);
+        assert!(added.run.is_some());
+    }
+
+    #[test]
+    fn edit_block_with_start_end_notify_covers_optional_closures() {
+        let (_temp, context) = test_context();
+        let plan_input = req(
+            1,
+            "tools/call",
+            json!({"name": "ccplan_plan_day", "arguments": {
+                "date": "2026-06-08", "timezone": "Asia/Kolkata",
+                "blocks": [{"id": "b1", "title": "Block", "start": "09:00", "end": "10:00"}]
+            }}),
+        );
+        let edit_input = req(
+            2,
+            "tools/call",
+            json!({"name": "ccplan_edit_block", "arguments": {
+                "id": "b1",
+                "date": "2026-06-08",
+                "start": "09:30",
+                "end": "10:30",
+                "notify": "3m"
+            }}),
+        );
+        let input = format!("{plan_input}{edit_input}");
+        let responses = run_serve(&context, input.as_bytes());
+        assert_eq!(responses[1]["result"]["isError"], false);
+    }
+
+    #[test]
+    fn edit_block_with_duration_and_run_covers_optional_closures() {
+        let (_temp, context) = test_context();
+        let plan_input = req(
+            1,
+            "tools/call",
+            json!({"name": "ccplan_plan_day", "arguments": {
+                "date": "2026-06-08", "timezone": "Asia/Kolkata",
+                "blocks": [{"id": "b2", "title": "Block2", "start": "11:00", "end": "12:00"}]
+            }}),
+        );
+        let edit_input = req(
+            2,
+            "tools/call",
+            json!({"name": "ccplan_edit_block", "arguments": {
+                "id": "b2",
+                "date": "2026-06-08",
+                "duration": "45m",
+                "run": ["/usr/bin/echo", "hi"]
+            }}),
+        );
+        let input = format!("{plan_input}{edit_input}");
+        let responses = run_serve(&context, input.as_bytes());
+        assert_eq!(responses[1]["result"]["isError"], false);
+    }
+
+    #[test]
+    fn add_reminder_with_explicit_id_covers_id_closure() {
+        let (_temp, context) = test_context();
+        let input = req(
+            1,
+            "tools/call",
+            json!({"name": "ccplan_add_reminder", "arguments": {
+                "text": "Stand up",
+                "in_duration": "30m",
+                "id": "standup-reminder"
+            }}),
+        );
+        let responses = run_serve(&context, input.as_bytes());
+        assert_eq!(responses[0]["result"]["isError"], false);
+    }
+
+    #[test]
+    fn tools_list_contains_all_eleven_tools() {
+        let (_temp, context) = test_context();
+        let input = req(1, "tools/list", json!({}));
+        let responses = run_serve(&context, input.as_bytes());
+        let tools = responses[0]["result"]["tools"].as_array().unwrap();
+        assert_eq!(tools.len(), 11);
+        let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
+        for expected in &[
+            "ccplan_plan_day",
+            "ccplan_apply",
+            "ccplan_show_plan",
+            "ccplan_list_now",
+            "ccplan_list_next",
+            "ccplan_show_agenda",
+            "ccplan_add_block",
+            "ccplan_add_reminder",
+            "ccplan_mark_block",
+            "ccplan_edit_block",
+            "ccplan_remove_block",
+        ] {
+            assert!(names.contains(expected), "missing tool: {expected}");
+        }
     }
 }
