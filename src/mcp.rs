@@ -11,10 +11,12 @@ use std::io::{BufRead, Write};
 use jiff::SignedDuration;
 use serde_json::{Value, json};
 
+use std::path::PathBuf;
+
 use crate::{
     cli::{AddArgs, AgendaArgs, ApplyArgs, BlockTarget, Commands, EditArgs, ReadArgs, RemindArgs},
     commands::{self, set_from_str, slug_block_id},
-    config::Config,
+    config::{AutomationConfig, Config},
     context::ContextRefs,
     error::{Error, Result},
     lifecycle::{EndBehavior, LifecyclePolicy},
@@ -261,6 +263,12 @@ fn plan_day_inner(args: &Value, context: &ContextRefs<'_>) -> Result<String> {
         blocks.push(parse_mcp_block(bv, i, context.config.notify.default_lead)?);
     }
 
+    // Collect run argvs before blocks is moved into Plan.
+    let run_argvs: Vec<Vec<String>> = blocks
+        .iter()
+        .filter_map(|b| b.run.as_ref().map(|r| r.as_slice().to_vec()))
+        .collect();
+
     let plan_date = date.unwrap_or_else(|| PlanDate::from_jiff_date(context.clock.now().date()));
     let plan = Plan {
         date: plan_date,
@@ -271,7 +279,13 @@ fn plan_day_inner(args: &Value, context: &ContextRefs<'_>) -> Result<String> {
 
     let mut out = Vec::new();
     set_from_str(&toml, None, override_history, &mut out, context)?;
-    Ok(String::from_utf8_lossy(&out).into_owned())
+    let runs: Vec<&[String]> = run_argvs.iter().map(Vec::as_slice).collect();
+    let mut result = String::from_utf8_lossy(&out).into_owned();
+    if let Some(warn) = run_authorization_warning(&context.config.automation, &runs) {
+        result.push_str(&warn);
+        result.push('\n');
+    }
+    Ok(result)
 }
 
 fn invoke_apply(args: &Value, context: &ContextRefs<'_>) -> Value {
@@ -339,6 +353,7 @@ fn invoke_add_block(args: &Value, context: &ContextRefs<'_>) -> Value {
     }
 }
 
+#[allow(clippy::too_many_lines)]
 fn add_block_inner(args: &Value, context: &ContextRefs<'_>) -> Result<String> {
     let title = args
         .get("title")
@@ -406,6 +421,7 @@ fn add_block_inner(args: &Value, context: &ContextRefs<'_>) -> Result<String> {
         .unwrap_or_default();
     let date = extract_date(args);
     let apply = args.get("apply").and_then(Value::as_bool).unwrap_or(false);
+    let run_copy = run.clone();
     let add_args = AddArgs {
         date: date.clone(),
         id,
@@ -426,12 +442,20 @@ fn add_block_inner(args: &Value, context: &ContextRefs<'_>) -> Result<String> {
         }));
         commands::dispatch(apply_cmd, &mut out, context)?;
     }
-    let text = String::from_utf8_lossy(&out).into_owned();
+    let mut text = String::from_utf8_lossy(&out).into_owned();
     if text.is_empty() {
-        Ok("block added".to_owned())
-    } else {
-        Ok(text)
+        "block added".clone_into(&mut text);
     }
+    let run_refs: Vec<&[String]> = if run_copy.is_empty() {
+        vec![]
+    } else {
+        vec![&run_copy]
+    };
+    if let Some(warn) = run_authorization_warning(&context.config.automation, &run_refs) {
+        text.push_str(&warn);
+        text.push('\n');
+    }
+    Ok(text)
 }
 
 fn invoke_add_reminder(args: &Value, context: &ContextRefs<'_>) -> Value {
@@ -613,6 +637,7 @@ fn error_code(e: &Error) -> &'static str {
         Error::AutomationRefused(_) => "automation_refused",
         Error::Scheduler(_) => "scheduler_error",
         Error::Plan(_) => "plan_error",
+        Error::Store(StoreError::Locked) => "store_locked",
         _ => "internal_error",
     }
 }
@@ -625,8 +650,43 @@ fn error_hint(e: &Error) -> &'static str {
         Error::NotFound(_) => "use ccplan_plan_day to create a plan first",
         Error::AutomationRefused(_) => "enable automation in config and allowlist the executable",
         Error::Scheduler(_) => "run ccplan doctor to diagnose the scheduler",
+        Error::Store(StoreError::Locked) => {
+            "another writer holds the store lock; retry in a moment"
+        }
         _ => "check the error message for details",
     }
+}
+
+/// Returns a warning string if any argv in `runs` would fail the automation check.
+///
+/// `runs` is a flat list of run argv vectors (one per block that carries a `run:` command).
+/// An empty slice means no run commands → returns `None` immediately.
+fn run_authorization_warning(automation: &AutomationConfig, runs: &[&[String]]) -> Option<String> {
+    if runs.is_empty() {
+        return None;
+    }
+    if !automation.enabled {
+        return Some(
+            "WARNING: one or more blocks have run: commands, but automation is disabled; \
+             the commands will NOT execute at fire time (the notification will still fire). \
+             Enable automation in config to arm them."
+                .to_owned(),
+        );
+    }
+    let unlisted: Vec<&str> = runs
+        .iter()
+        .filter_map(|argv| argv.first().map(String::as_str))
+        .filter(|p| !automation.allowed_executables.contains(&PathBuf::from(p)))
+        .collect();
+    if unlisted.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "WARNING: the following run: executables are not in the allowlist and will NOT \
+         execute at fire time (the notification will still fire): {}. \
+         Add them to allowed_executables in config to arm them.",
+        unlisted.join(", ")
+    ))
 }
 
 // ── Field helpers ─────────────────────────────────────────────────────────────
@@ -1007,14 +1067,17 @@ mod tests {
     use jiff::Zoned;
     use serde_json::{Value, json};
 
+    use std::path::PathBuf;
+
     use crate::{
-        config::Config,
+        config::{AutomationConfig, Config},
         context::{Context, RecordingNotifier, RecordingScheduler},
+        error::Error,
         model::{
             Block, BlockId, ClockTime, DurationSpec, Lead, Plan, PlanDate, Span, Status,
             TimeZoneName,
         },
-        store::{HistoryPolicy, Store},
+        store::{HistoryPolicy, Store, StoreError},
         time::FixedClock,
     };
 
@@ -2358,5 +2421,185 @@ mod tests {
         ] {
             assert!(names.contains(expected), "missing tool: {expected}");
         }
+    }
+
+    // --- Security / M4 tests ---
+
+    #[test]
+    fn tool_catalog_excludes_fire_mcp_completions() {
+        let (_temp, context) = test_context();
+        let input = req(1, "tools/list", json!({}));
+        let responses = run_serve(&context, input.as_bytes());
+        let tools = responses[0]["result"]["tools"].as_array().unwrap();
+        let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
+        for forbidden in &[
+            "fire",
+            "ccplan_fire",
+            "mcp",
+            "ccplan_mcp",
+            "completions",
+            "ccplan_completions",
+        ] {
+            assert!(
+                !names.contains(forbidden),
+                "tool catalog must not expose {forbidden}"
+            );
+        }
+    }
+
+    #[test]
+    fn unknown_tool_returns_error() {
+        let (_temp, context) = test_context();
+        let mut input = notif("notifications/initialized");
+        input.push_str(&req(
+            1,
+            "tools/call",
+            json!({"name": "ccplan_fire", "arguments": {}}),
+        ));
+        let responses = run_serve(&context, input.as_bytes());
+        assert_eq!(responses[0]["result"]["isError"], true);
+        let text = responses[0]["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap();
+        assert!(
+            text.contains("unknown tool"),
+            "expected 'unknown tool' error, got: {text}"
+        );
+    }
+
+    #[test]
+    fn store_locked_error_has_store_locked_code() {
+        let e = Error::Store(StoreError::Locked);
+        assert_eq!(super::error_code(&e), "store_locked");
+    }
+
+    #[test]
+    fn store_locked_error_hint_suggests_retry() {
+        let e = Error::Store(StoreError::Locked);
+        let hint = super::error_hint(&e);
+        assert!(
+            hint.contains("retry"),
+            "hint should mention retry, got: {hint}"
+        );
+    }
+
+    #[test]
+    fn run_authorization_warning_empty_runs_returns_none() {
+        let automation = AutomationConfig::default();
+        assert!(super::run_authorization_warning(&automation, &[]).is_none());
+    }
+
+    #[test]
+    fn run_authorization_warning_automation_disabled_returns_warning() {
+        let automation = AutomationConfig::default();
+        let run = vec!["notify-send".to_owned(), "hello".to_owned()];
+        let result = super::run_authorization_warning(&automation, &[&run]);
+        assert!(result.is_some(), "should warn when automation is disabled");
+        let msg = result.unwrap();
+        assert!(msg.contains("automation is disabled"), "got: {msg}");
+        assert!(msg.contains("notification will still fire"), "got: {msg}");
+    }
+
+    #[test]
+    fn run_authorization_warning_unlisted_executable_returns_warning() {
+        let automation = AutomationConfig {
+            enabled: true,
+            allowed_executables: vec![PathBuf::from("/usr/bin/allowed")],
+            ..Default::default()
+        };
+        let run = vec!["/usr/bin/unlisted".to_owned(), "arg".to_owned()];
+        let result = super::run_authorization_warning(&automation, &[&run]);
+        assert!(result.is_some(), "should warn for unlisted executable");
+        let msg = result.unwrap();
+        assert!(msg.contains("/usr/bin/unlisted"), "got: {msg}");
+        assert!(msg.contains("not in the allowlist"), "got: {msg}");
+    }
+
+    #[test]
+    fn run_authorization_warning_allowlisted_executable_returns_none() {
+        let automation = AutomationConfig {
+            enabled: true,
+            allowed_executables: vec![PathBuf::from("/usr/bin/allowed")],
+            ..Default::default()
+        };
+        let run = vec!["/usr/bin/allowed".to_owned()];
+        assert!(
+            super::run_authorization_warning(&automation, &[&run]).is_none(),
+            "no warning when executable is allowlisted"
+        );
+    }
+
+    #[test]
+    fn plan_day_with_run_block_and_automation_disabled_emits_warning() {
+        let (_temp, ctx) = test_context();
+        let mut input = notif("notifications/initialized");
+        input.push_str(&req(
+            1,
+            "tools/call",
+            json!({
+                "name": "ccplan_plan_day",
+                "arguments": {
+                    "timezone": "Asia/Kolkata",
+                    "blocks": [{
+                        "title": "Scripted Block",
+                        "start": "10:00",
+                        "duration": "1h",
+                        "run": ["/usr/bin/notify-send", "hello"]
+                    }]
+                }
+            }),
+        ));
+        let responses = run_serve(&ctx, input.as_bytes());
+        let tool_text = responses[0]["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap();
+        assert!(
+            tool_text.contains("WARNING"),
+            "should warn about disabled automation; got: {tool_text}"
+        );
+        assert!(
+            tool_text.contains("automation is disabled"),
+            "got: {tool_text}"
+        );
+    }
+
+    #[test]
+    fn add_block_with_run_and_automation_disabled_emits_warning() {
+        let (_temp, ctx) = test_context();
+        let plan_input = req(
+            1,
+            "tools/call",
+            json!({
+                "name": "ccplan_plan_day",
+                "arguments": {
+                    "timezone": "Asia/Kolkata",
+                    "blocks": [{"title": "Seed", "start": "10:00", "duration": "1h"}]
+                }
+            }),
+        );
+        let add_input = req(
+            2,
+            "tools/call",
+            json!({
+                "name": "ccplan_add_block",
+                "arguments": {
+                    "title": "Shell Block",
+                    "start": "11:00",
+                    "duration": "30m",
+                    "run": ["/usr/local/bin/sync.sh"]
+                }
+            }),
+        );
+        let mut input = notif("notifications/initialized");
+        input.push_str(&plan_input);
+        input.push_str(&add_input);
+        let responses = run_serve(&ctx, input.as_bytes());
+        let tool_text = responses[1]["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap();
+        assert!(
+            tool_text.contains("WARNING"),
+            "should warn about disabled automation; got: {tool_text}"
+        );
     }
 }
