@@ -1,0 +1,7 @@
+# ccplan is distributed as prebuilt binaries via cargo-dist (GitHub Releases on
+# tag push), not published to crates.io. Disabling `publish` stops release-plz
+# from running `cargo publish` and makes it compute version diffs from git tags
+# instead of the crates.io registry — which otherwise errors with
+# "package `ccplan` not found in the registry, but the git tag vX.Y.Z exists".
+[workspace]
+publish = false

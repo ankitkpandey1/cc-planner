@@ -8,3 +8,10 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    ignore:
+      # The MSRV job pins dtolnay/rust-toolchain to the crate's declared
+      # `rust-version` on purpose. Dependabot treats that pin like an action
+      # version and proposes bogus bumps (e.g. to a Rust release that does not
+      # exist); bumping it would silently defeat the MSRV gate. Manage this pin
+      # by hand alongside `rust-version` in Cargo.toml.
+      - dependency-name: "dtolnay/rust-toolchain"

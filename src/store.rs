@@ -319,12 +319,12 @@ impl Store {
             .iter()
             .filter(|block| block.status.is_terminal())
             .collect();
-        if existing.timezone != incoming.timezone {
-            if let Some(terminal) = terminal_blocks.first() {
-                return Err(StoreError::TerminalHistory {
-                    id: terminal.id.clone(),
-                });
-            }
+        if existing.timezone != incoming.timezone
+            && let Some(terminal) = terminal_blocks.first()
+        {
+            return Err(StoreError::TerminalHistory {
+                id: terminal.id.clone(),
+            });
         }
 
         let mut blocks = incoming.blocks.clone();

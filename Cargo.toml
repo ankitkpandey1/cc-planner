@@ -2,7 +2,7 @@
 name = "ccplan"
 version = "1.0.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.94"
 license = "MIT OR Apache-2.0"
 authors = ["Ankit Pandey <itsankitkp@gmail.com>"]
 description = "Agent-authorable cross-platform CLI day planner with native time triggers."

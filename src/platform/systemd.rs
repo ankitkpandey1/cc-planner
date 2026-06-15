@@ -173,10 +173,10 @@ fn scheduler_environment() -> Vec<(&'static str, String)> {
         values.push(("DBUS_SESSION_BUS_ADDRESS", address));
     }
     for name in ["DISPLAY", "WAYLAND_DISPLAY", "XAUTHORITY", "CCPLAN_ROOT"] {
-        if let Ok(value) = env::var(name) {
-            if !value.is_empty() {
-                values.push((name, value));
-            }
+        if let Ok(value) = env::var(name)
+            && !value.is_empty()
+        {
+            values.push((name, value));
         }
     }
     values
