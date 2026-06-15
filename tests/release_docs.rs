@@ -188,10 +188,11 @@ fn release_workflows_and_badges_are_real() {
 
     let readme = read_repo_file("README.md");
     assert!(readme.contains("actions/workflows/ci.yml/badge.svg"));
-    // The crates.io badge resolves once the release pipeline publishes the crate. The codecov
-    // badge is intentionally omitted: it requires manually activating the repo on codecov.io and
-    // would otherwise render as "unknown" on a fresh public repo.
-    assert!(readme.contains("img.shields.io/crates/v/ccplan"));
+    // Badges reflect only what is live: CI status and the published GitHub release. The crates.io
+    // and codecov badges are intentionally omitted — they would render "not found"/"unknown" until
+    // the crate is published and the repo is activated on codecov.io, which reads as half-baked.
+    assert!(readme.contains("img.shields.io/github/v/release/ankitkpandey1/ccplan"));
+    assert!(!readme.contains("img.shields.io/crates/v/"));
     assert!(!readme.contains("codecov.io"));
     assert!(!readme.contains("CI-pending"));
     assert!(!readme.contains("crates.io-unpublished"));

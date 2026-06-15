@@ -16,7 +16,7 @@ a whole day from stdin, apply native triggers, then inspect the result with JSON
 Install and verify `ccplan` non-interactively:
 
 ```sh
-cargo binstall -y ccplan
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/ankitkpandey1/ccplan/releases/latest/download/ccplan-installer.sh | sh
 ccplan --version
 ccplan doctor
 ```

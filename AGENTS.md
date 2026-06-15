@@ -9,7 +9,7 @@ The canonical recipe below is mirrored in `skills/ccplan/SKILL.md`.
 Install and verify `ccplan` non-interactively:
 
 ```sh
-cargo binstall -y ccplan
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/ankitkpandey1/ccplan/releases/latest/download/ccplan-installer.sh | sh
 ccplan --version
 ccplan doctor
 ```

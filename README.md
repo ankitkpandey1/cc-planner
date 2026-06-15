@@ -5,7 +5,7 @@
 **A plain-text, agent-fillable day planner that notifies you, tracks block status, and runs commands at the right time.**
 
 [![CI](https://github.com/ankitkpandey1/ccplan/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/ankitkpandey1/ccplan/actions/workflows/ci.yml)
-[![crates.io](https://img.shields.io/crates/v/ccplan.svg)](https://crates.io/crates/ccplan)
+[![release](https://img.shields.io/github/v/release/ankitkpandey1/ccplan?sort=semver)](https://github.com/ankitkpandey1/ccplan/releases/latest)
 [![license](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)](#license)
 
 </div>
@@ -64,15 +64,11 @@ curl --proto '=https' --tlsv1.2 -LsSf https://github.com/ankitkpandey1/ccplan/re
 
 # Windows (PowerShell installer)
 powershell -c "irm https://github.com/ankitkpandey1/ccplan/releases/latest/download/ccplan-installer.ps1 | iex"
-
-# Homebrew
-brew install ankitkpandey1/tap/ccplan
-
-# Cargo (from crates.io, once published)
-cargo install ccplan
-# or prebuilt via binstall
-cargo binstall ccplan
 ```
+
+Each release ships signed-checksum archives for Linux (x64/ARM64), macOS (Intel/Apple Silicon), and
+Windows, plus a Windows `.msi` — download any of them directly from the
+[latest release](https://github.com/ankitkpandey1/ccplan/releases/latest).
 
 ---
 
@@ -107,10 +103,9 @@ That's it — at 11:00 you get a "Focus time" notification, at 11:30 the sync-up
 **Install (agent-driven).** An agent can install `ccplan` non-interactively and confirm it works:
 
 ```sh
-# Install the binary (pick what's available in the environment)
-cargo binstall -y ccplan  ||  cargo install ccplan  ||  \
-  curl --proto '=https' --tlsv1.2 -LsSf \
-    https://github.com/ankitkpandey1/ccplan/releases/latest/download/ccplan-installer.sh | sh
+# Install the prebuilt binary (Linux/macOS; on Windows run the PowerShell line from Install above)
+curl --proto '=https' --tlsv1.2 -LsSf \
+  https://github.com/ankitkpandey1/ccplan/releases/latest/download/ccplan-installer.sh | sh
 
 ccplan --version          # confirm install
 ccplan doctor             # confirm the OS scheduler + notifier are usable, with fixes if not

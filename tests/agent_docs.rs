@@ -85,7 +85,7 @@ fn agents_and_skill_share_the_canonical_recipe() {
 
     assert_eq!(agents_recipe, skill_recipe);
     for required in [
-        "cargo binstall -y ccplan",
+        "ccplan-installer.sh",
         "ccplan --version",
         "ccplan doctor",
         "ccplan set --from -",
