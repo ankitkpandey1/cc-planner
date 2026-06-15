@@ -182,7 +182,7 @@
         <!--<Icon Id='ProductICO' SourceFile='wix\Product.ico'/>-->
         <!--<Property Id='ARPPRODUCTICON' Value='ProductICO' />-->
 
-        <Property Id='ARPHELPLINK' Value='https://github.com/ankitkpandey1/cc-planner'/>
+        <Property Id='ARPHELPLINK' Value='https://github.com/ankitkpandey1/ccplan'/>
         
         <UI>
             <UIRef Id='WixUI_FeatureTree'/>

@@ -6,8 +6,8 @@ rust-version = "1.94"
 license = "MIT OR Apache-2.0"
 authors = ["Ankit Pandey <itsankitkp@gmail.com>"]
 description = "Agent-authorable cross-platform CLI day planner with native time triggers."
-homepage = "https://github.com/ankitkpandey1/cc-planner"
-repository = "https://github.com/ankitkpandey1/cc-planner"
+homepage = "https://github.com/ankitkpandey1/ccplan"
+repository = "https://github.com/ankitkpandey1/ccplan"
 readme = "README.md"
 keywords = ["cli", "planner", "scheduler", "productivity"]
 categories = ["command-line-utilities"]
@@ -53,7 +53,7 @@ default = []
 test-fakes = []
 
 [package.metadata.binstall]
-pkg-url = "https://github.com/ankitkpandey1/cc-planner/releases/download/v{ version }/ccplan-{ target }.{ archive-format }"
+pkg-url = "https://github.com/ankitkpandey1/ccplan/releases/download/v{ version }/ccplan-{ target }.{ archive-format }"
 pkg-fmt = "txz"
 bin-dir = "ccplan-{ target }/{ bin }{ binary-ext }"
 

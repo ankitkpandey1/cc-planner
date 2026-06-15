@@ -1,6 +1,6 @@
 # ccplan — Design Doc
 
-**App / binary name:** `ccplan`  ·  **Repo:** `cc-planner`
+**App / binary name:** `ccplan`  ·  **Repo:** `ccplan`
 **Author:** Ankit Pandey <itsankitkp@gmail.com>
 **Implementation language:** Rust · **Targets:** Linux, macOS, Windows (cross-platform CLI)
 

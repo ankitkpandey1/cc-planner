@@ -76,7 +76,7 @@ fn cargo_manifest_declares_release_metadata() {
     assert_eq!(package["license"].as_str(), Some("MIT OR Apache-2.0"));
     assert_eq!(
         package["homepage"].as_str(),
-        Some("https://github.com/ankitkpandey1/cc-planner"),
+        Some("https://github.com/ankitkpandey1/ccplan"),
     );
     assert!(package["authors"].as_array().is_some_and(|authors| {
         authors.iter().any(|author| {
@@ -88,7 +88,7 @@ fn cargo_manifest_declares_release_metadata() {
 
     let binstall = &package["metadata"]["binstall"];
     assert!(binstall["pkg-url"].as_str().is_some_and(|url| {
-        url.contains("github.com/ankitkpandey1/cc-planner/releases/download")
+        url.contains("github.com/ankitkpandey1/ccplan/releases/download")
             && url.contains("{ archive-format }")
     }));
     assert_eq!(binstall["pkg-fmt"].as_str(), Some("txz"));

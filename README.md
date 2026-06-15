@@ -4,14 +4,14 @@
 
 **A plain-text, agent-fillable day planner that notifies you, tracks block status, and runs commands at the right time.**
 
-[![CI](https://github.com/ankitkpandey1/cc-planner/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/ankitkpandey1/cc-planner/actions/workflows/ci.yml)
+[![CI](https://github.com/ankitkpandey1/ccplan/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/ankitkpandey1/ccplan/actions/workflows/ci.yml)
 [![crates.io](https://img.shields.io/crates/v/ccplan.svg)](https://crates.io/crates/ccplan)
 [![license](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)](#license)
 
 </div>
 
-> **Status:** pre-release. The `1.0.0` code is complete, but it is not yet tagged or published —
-> install by [building from source](#build-from-source) for now. Design notes live in [`DESIGN.md`](DESIGN.md).
+> **`v1.0.0` is released** — grab a [prebuilt binary or installer](#install) for Linux, macOS, or
+> Windows. Design notes live in [`DESIGN.md`](DESIGN.md).
 
 ---
 
@@ -58,15 +58,12 @@ runs on Linux/macOS/Windows, and keeps a human-readable plain-text plan as its s
 
 ## Install
 
-> Prebuilt binaries and installers are produced by the release pipeline starting at `v1.0.0`.
-> Until then, [build from source](#build-from-source).
-
 ```sh
 # Linux / macOS (shell installer)
-curl --proto '=https' --tlsv1.2 -LsSf https://github.com/ankitkpandey1/cc-planner/releases/latest/download/ccplan-installer.sh | sh
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/ankitkpandey1/ccplan/releases/latest/download/ccplan-installer.sh | sh
 
 # Windows (PowerShell installer)
-powershell -c "irm https://github.com/ankitkpandey1/cc-planner/releases/latest/download/ccplan-installer.ps1 | iex"
+powershell -c "irm https://github.com/ankitkpandey1/ccplan/releases/latest/download/ccplan-installer.ps1 | iex"
 
 # Homebrew
 brew install ankitkpandey1/tap/ccplan
@@ -113,7 +110,7 @@ That's it — at 11:00 you get a "Focus time" notification, at 11:30 the sync-up
 # Install the binary (pick what's available in the environment)
 cargo binstall -y ccplan  ||  cargo install ccplan  ||  \
   curl --proto '=https' --tlsv1.2 -LsSf \
-    https://github.com/ankitkpandey1/cc-planner/releases/latest/download/ccplan-installer.sh | sh
+    https://github.com/ankitkpandey1/ccplan/releases/latest/download/ccplan-installer.sh | sh
 
 ccplan --version          # confirm install
 ccplan doctor             # confirm the OS scheduler + notifier are usable, with fixes if not
@@ -309,8 +306,8 @@ schedules and runs automation; `doctor` tells you what's available.
 Requires a recent stable Rust toolchain (edition 2024; see `rust-toolchain.toml`).
 
 ```sh
-git clone https://github.com/ankitkpandey1/cc-planner
-cd cc-planner
+git clone https://github.com/ankitkpandey1/ccplan
+cd ccplan
 cargo build --release
 ./target/release/ccplan --help
 ```
