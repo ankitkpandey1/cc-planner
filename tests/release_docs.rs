@@ -171,7 +171,7 @@ fn release_workflows_and_badges_are_real() {
     assert_file_contains(
         ".github/workflows/release-plz.yml",
         &[
-            "release-plz/release-plz-action@v0.5",
+            "release-plz/action@v0.5",
             "release-plz release-pr",
             "release-plz release",
             "branches: [main]",
