@@ -24,6 +24,7 @@ pub(crate) fn command() -> Command {
         .subcommand(read_command("agenda"))
         .subcommand(apply_command())
         .subcommand(fire_command())
+        .subcommand(log_command())
         .subcommand(Command::new("status"))
         .subcommand(Command::new("doctor"))
         .subcommand(completions_command())
@@ -109,6 +110,13 @@ fn fire_command() -> Command {
         .arg(Arg::new("rev").long("rev").required(true))
         .arg(Arg::new("at").long("at").required(true))
         .arg(flag("dry_run", "dry-run"))
+}
+
+fn log_command() -> Command {
+    Command::new("log")
+        .arg(date_arg())
+        .arg(Arg::new("since").long("since"))
+        .arg(flag("json", "json"))
 }
 
 fn completions_command() -> Command {

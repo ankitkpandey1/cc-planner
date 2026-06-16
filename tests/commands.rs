@@ -901,11 +901,9 @@ fn fire_start_records_ledger_notifies_updates_status_and_deduplicates() {
     let stored = context.store.load_plan(&date()).unwrap().unwrap();
     assert_eq!(stored.blocks[0].status, Status::Active);
     assert_eq!(context.notifier.notifications().len(), 1);
-    assert!(
-        std::fs::read_to_string(context.store.fire_log_path())
-            .unwrap()
-            .contains("focus start")
-    );
+    let logged = std::fs::read_to_string(context.store.fire_log_path()).unwrap();
+    assert!(logged.contains("\"id\":\"focus\""));
+    assert!(logged.contains("\"event\":\"start\""));
 }
 
 #[test]
@@ -1141,6 +1139,76 @@ where
 
 fn focus_rev<C, S, N>(context: &Context<C, S, N>) -> ccplan::model::ScheduleRev {
     context.store.load_plan(&date()).unwrap().unwrap().blocks[0].schedule_rev()
+}
+
+#[test]
+fn fire_log_reads_the_ledger_with_filters() {
+    // Empty ledger: nothing has fired yet.
+    let (_empty_temp, empty) = test_context_at("2026-06-08T11:00:00+05:30[Asia/Kolkata]");
+    assert_eq!(
+        String::from_utf8(run_ok(&empty, ["ccplan", "log"]))
+            .unwrap()
+            .trim(),
+        "no fires recorded"
+    );
+
+    // Fire a real start event so the ledger holds one activate record.
+    let (_temp, context) = test_context_at("2026-06-08T11:00:00+05:30[Asia/Kolkata]");
+    context
+        .store
+        .set_plan(&plan(), HistoryPolicy::Preserve)
+        .unwrap();
+    let rev = focus_rev(&context);
+    run_ok(
+        &context,
+        fire_args("focus", "start", rev.as_str(), "2026-06-08T05:30:00Z"),
+    );
+
+    // Human table carries the block id and outcome.
+    let human = String::from_utf8(run_ok(&context, ["ccplan", "log"])).unwrap();
+    assert!(human.contains("focus"), "human log: {human}");
+    assert!(human.contains("activate"), "human log: {human}");
+
+    // JSON output is structured.
+    let json = String::from_utf8(run_ok(&context, ["ccplan", "log", "--json"])).unwrap();
+    assert!(
+        json.contains("\"outcome\": \"activate\""),
+        "json log: {json}"
+    );
+
+    // --date keeps a matching date, drops a non-matching one.
+    let matched = String::from_utf8(run_ok(
+        &context,
+        ["ccplan", "log", "--date", "2026-06-08", "--json"],
+    ))
+    .unwrap();
+    assert!(matched.contains("\"id\": \"focus\""), "matched: {matched}");
+    assert_eq!(
+        String::from_utf8(run_ok(&context, ["ccplan", "log", "--date", "2026-06-09"]))
+            .unwrap()
+            .trim(),
+        "no fires recorded"
+    );
+
+    // --since keeps fires at/after the instant, drops earlier ones.
+    let since_before = String::from_utf8(run_ok(
+        &context,
+        ["ccplan", "log", "--since", "2026-06-08T05:00:00Z", "--json"],
+    ))
+    .unwrap();
+    assert!(
+        since_before.contains("\"outcome\": \"activate\""),
+        "since_before: {since_before}"
+    );
+    assert_eq!(
+        String::from_utf8(run_ok(
+            &context,
+            ["ccplan", "log", "--since", "2026-06-08T06:00:00Z"]
+        ))
+        .unwrap()
+        .trim(),
+        "no fires recorded"
+    );
 }
 
 fn fire_args(id: &str, event: &str, rev: &str, at: &str) -> Vec<String> {
@@ -1607,11 +1675,9 @@ fn test_fire_dry_run_leaves_ledger_untouched_so_real_fire_still_fires() {
         "the real fire after a dry-run must still activate the block"
     );
     assert_eq!(context.notifier.notifications().len(), 1);
-    assert!(
-        std::fs::read_to_string(context.store.fire_log_path())
-            .unwrap()
-            .contains("focus start")
-    );
+    let logged = std::fs::read_to_string(context.store.fire_log_path()).unwrap();
+    assert!(logged.contains("\"id\":\"focus\""));
+    assert!(logged.contains("\"event\":\"start\""));
 }
 
 #[test]

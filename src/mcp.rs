@@ -8,13 +8,16 @@
 
 use std::io::{BufRead, Write};
 
-use jiff::SignedDuration;
+use jiff::{SignedDuration, Timestamp};
 use serde_json::{Value, json};
 
 use std::path::PathBuf;
 
 use crate::{
-    cli::{AddArgs, AgendaArgs, ApplyArgs, BlockTarget, Commands, EditArgs, ReadArgs, RemindArgs},
+    cli::{
+        AddArgs, AgendaArgs, ApplyArgs, BlockTarget, Commands, EditArgs, LogArgs, ReadArgs,
+        RemindArgs,
+    },
     commands::{self, set_from_str, slug_block_id},
     config::{AutomationConfig, Config},
     context::ContextRefs,
@@ -217,6 +220,7 @@ fn call_tool(name: &str, args: &Value, context: &ContextRefs<'_>) -> Value {
         "ccplan_mark_block" => invoke_mark_block(args, context),
         "ccplan_edit_block" => invoke_edit_block(args, context),
         "ccplan_remove_block" => invoke_remove_block(args, context),
+        "ccplan_fire_log" => invoke_fire_log(args, context),
         _ => tool_error(&json!({
             "error": "unknown_tool",
             "message": format!("unknown tool: {name}"),
@@ -331,6 +335,30 @@ fn invoke_list_next(args: &Value, context: &ContextRefs<'_>) -> Value {
 fn invoke_show_agenda(args: &Value, context: &ContextRefs<'_>) -> Value {
     let cmd = Commands::Agenda(AgendaArgs {
         date: extract_date(args),
+        json: true,
+    });
+    invoke_read_cmd(cmd, context)
+}
+
+/// Read-only close-the-loop tool: returns the fire ledger so the agent can see what the scheduler
+/// actually did and re-plan. Optional `date` / `since` (RFC 3339) filters narrow the result.
+fn invoke_fire_log(args: &Value, context: &ContextRefs<'_>) -> Value {
+    let since = match args.get("since").and_then(Value::as_str) {
+        Some(raw) => match raw.parse::<Timestamp>() {
+            Ok(ts) => Some(ts),
+            Err(_) => {
+                return tool_error(&json!({
+                    "error": "invalid_argument",
+                    "message": format!("`since` is not a valid RFC 3339 timestamp: {raw}"),
+                    "hint": "pass an RFC 3339 instant like 2026-06-16T09:00:00Z"
+                }));
+            }
+        },
+        None => None,
+    };
+    let cmd = Commands::Log(LogArgs {
+        date: extract_date(args),
+        since,
         json: true,
     });
     invoke_read_cmd(cmd, context)
@@ -812,6 +840,7 @@ fn tool_catalog() -> Vec<Value> {
         mark_block_schema(),
         edit_block_schema(),
         remove_block_schema(),
+        fire_log_schema(),
     ]
 }
 
@@ -894,6 +923,26 @@ fn apply_schema() -> Value {
                 "dry_run": {
                     "type": "boolean",
                     "description": "Preview changes without applying them."
+                }
+            }
+        }
+    })
+}
+
+fn fire_log_schema() -> Value {
+    json!({
+        "name": "ccplan_fire_log",
+        "description": "Return the fire ledger — what the scheduler actually did when blocks' events fired (notify/activate/missed/close), newest filters applied. This closes the loop: read it to see what happened while you were away, then re-plan. Each entry has ts, date, id, event, outcome, and a human-readable detail. Returns [] when nothing has fired. Read-only.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "date": {
+                    "type": "string",
+                    "description": "ISO date YYYY-MM-DD. Only show fires for this plan date."
+                },
+                "since": {
+                    "type": "string",
+                    "description": "RFC 3339 instant (e.g. 2026-06-16T09:00:00Z). Only show fires at or after this time — e.g. what fired since you last looked."
                 }
             }
         }
@@ -2399,12 +2448,12 @@ mod tests {
     }
 
     #[test]
-    fn tools_list_contains_all_eleven_tools() {
+    fn tools_list_contains_all_twelve_tools() {
         let (_temp, context) = test_context();
         let input = req(1, "tools/list", json!({}));
         let responses = run_serve(&context, input.as_bytes());
         let tools = responses[0]["result"]["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 11);
+        assert_eq!(tools.len(), 12);
         let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         for expected in &[
             "ccplan_plan_day",
@@ -2418,9 +2467,58 @@ mod tests {
             "ccplan_mark_block",
             "ccplan_edit_block",
             "ccplan_remove_block",
+            "ccplan_fire_log",
         ] {
             assert!(names.contains(expected), "missing tool: {expected}");
         }
+    }
+
+    #[test]
+    fn fire_log_tool_reads_ledger_and_validates_since() {
+        let (_temp, context) = test_context();
+        // Seed the ledger directly so the read-only tool has something to return.
+        let path = context.store.fire_log_path();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            "{\"ts\":\"2026-06-08T05:30:00Z\",\"date\":\"2026-06-08\",\"id\":\"focus\",\"event\":\"start\",\"outcome\":\"activate\",\"detail\":\"activated\"}\n",
+        )
+        .unwrap();
+
+        let mut input = notif("notifications/initialized");
+        input.push_str(&req(
+            1,
+            "tools/call",
+            json!({"name": "ccplan_fire_log", "arguments": {}}),
+        ));
+        input.push_str(&req(
+            2,
+            "tools/call",
+            json!({"name": "ccplan_fire_log", "arguments": {"since": "2026-06-08T00:00:00Z"}}),
+        ));
+        input.push_str(&req(
+            3,
+            "tools/call",
+            json!({"name": "ccplan_fire_log", "arguments": {"since": "not-a-timestamp"}}),
+        ));
+        let responses = run_serve(&context, input.as_bytes());
+
+        // No-filter read returns the record.
+        let text0 = responses[0]["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap();
+        assert!(text0.contains("activate"), "{text0}");
+        // Valid `since` still returns it.
+        let text1 = responses[1]["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap();
+        assert!(text1.contains("activate"), "{text1}");
+        // Invalid `since` is a structured error, not a panic.
+        assert_eq!(responses[2]["result"]["isError"], true);
+        let err = responses[2]["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap();
+        assert!(err.contains("RFC 3339"), "{err}");
     }
 
     // --- Security / M4 tests ---

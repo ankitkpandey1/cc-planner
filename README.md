@@ -161,6 +161,7 @@ An agent authors the whole day in one shot by piping TOML into `ccplan set --fro
 | `ccplan now` | Array of blocks active right now. |
 | `ccplan next` | Array of the next upcoming block(s). |
 | `ccplan agenda` | Remaining blocks with countdowns. |
+| `ccplan log [--date <d>] [--since <rfc3339>]` | The fire ledger — what the scheduler actually did (notify/activate/missed/close). |
 
 **System**
 
@@ -195,7 +196,7 @@ server over stdio (JSON-RPC 2.0, newline-delimited). Wire it into any MCP host:
 }
 ```
 
-**Exposed tools** (11 total):
+**Exposed tools** (12 total):
 
 | Tool | What it does |
 |---|---|
@@ -210,6 +211,13 @@ server over stdio (JSON-RPC 2.0, newline-delimited). Wire it into any MCP host:
 | `ccplan_mark_block` | Mark a block done or skipped |
 | `ccplan_edit_block` | Patch title, time, notify, or run on a non-terminal block |
 | `ccplan_remove_block` | Remove a pending block |
+| `ccplan_fire_log` | Read the fire ledger — what fired while you were away (`[]` if none) |
+
+**Close the loop.** `ccplan_fire_log` is the read side of the agent loop: the scheduler fires
+blocks on real OS time, and the agent calls `ccplan_fire_log` (optionally `since` the last time it
+looked) to see what actually happened — what notified, what `run:` activated, what was missed — and
+re-plans from there. Each entry is `{ ts, date, id, event, outcome, detail }`. It's read-only: it
+observes history and never fires anything.
 
 `fire`, `mcp`, and `completions` are **never** exposed as MCP tools. No tool can modify
 `automation.enabled` or the allowlist. When a `run:` command is stored but would not execute

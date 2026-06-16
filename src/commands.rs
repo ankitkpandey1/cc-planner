@@ -15,8 +15,8 @@ use serde::Serialize;
 
 use crate::{
     cli::{
-        AddArgs, AgendaArgs, ApplyArgs, ClearArgs, Cli, Commands, EditArgs, FireArgs, ReadArgs,
-        RemindArgs, SetArgs, Shell,
+        AddArgs, AgendaArgs, ApplyArgs, ClearArgs, Cli, Commands, EditArgs, FireArgs, LogArgs,
+        ReadArgs, RemindArgs, SetArgs, Shell,
     },
     config::AutomationConfig,
     context::{ContextRefs, Notification, Scheduler},
@@ -26,7 +26,7 @@ use crate::{
         Block, BlockId, ClockTime, DurationSpec, Lead, Plan, PlanDate, Run, Span, Status,
         TimeZoneName,
     },
-    store::{FiredEventKey, FiredStatus, HistoryPolicy, Store, TriggerRecord},
+    store::{FireRecord, FiredEventKey, FiredStatus, HistoryPolicy, Store, TriggerRecord},
     time::{resolve_block_end, resolve_block_start},
 };
 
@@ -51,6 +51,7 @@ pub fn dispatch(
         Some(Commands::Agenda(args)) => agenda(args, out, context),
         Some(Commands::Apply(args)) => apply(args, out, context),
         Some(Commands::Fire(args)) => fire(&args, out, context),
+        Some(Commands::Log(args)) => fire_log(args, out, context),
         Some(Commands::Status) => status(out, context),
         Some(Commands::Doctor) => doctor(out, context),
         Some(Commands::Completions(args)) => {
@@ -364,6 +365,37 @@ fn agenda(args: AgendaArgs, out: &mut dyn Write, context: &ContextRefs<'_>) -> R
     write_read_rows(out, args.json, &blocks, "nothing left on today's agenda")
 }
 
+/// Reads the fire ledger — what the scheduler actually did — newest filters applied.
+///
+/// The read side of close-the-loop: optionally narrow to one `--date` or to fires at/after a
+/// `--since` timestamp, then emit machine `--json` or a scannable human table. A missing ledger is
+/// an empty history, not an error.
+fn fire_log(args: LogArgs, out: &mut dyn Write, context: &ContextRefs<'_>) -> Result<()> {
+    let LogArgs { date, since, json } = args;
+    let mut records = context.store.read_fire_log()?;
+    if let Some(date) = &date {
+        records.retain(|record| &record.date == date);
+    }
+    if let Some(since) = since {
+        records.retain(|record| record.ts >= since);
+    }
+    if json {
+        serde_json::to_writer_pretty(&mut *out, &records)?;
+        writeln!(out)?;
+    } else if records.is_empty() {
+        writeln!(out, "no fires recorded")?;
+    } else {
+        for record in &records {
+            let line = format!(
+                "{}  {} {} {}  {}  {}",
+                record.ts, record.date, record.id, record.event, record.outcome, record.detail
+            );
+            writeln!(out, "{line}")?;
+        }
+    }
+    Ok(())
+}
+
 fn apply(args: ApplyArgs, out: &mut dyn Write, context: &ContextRefs<'_>) -> Result<()> {
     let date = args.date.unwrap_or_else(|| today(context));
     // `apply` is a mutation point and persists overdue reconciliation; `--dry-run` is a preview and
@@ -428,29 +460,46 @@ fn fire(args: &FireArgs, out: &mut dyn Write, context: &ContextRefs<'_>) -> Resu
         return Ok(());
     }
 
-    let mut log_line = format!("{} {} {}", args.date, args.id, args.event);
+    // The coarse outcome category comes straight from the decision arm; `detail` carries the
+    // human-readable specifics each handler appends (e.g. `run-refused: ...`, `notify-failed=...`).
+    let outcome = match &decision {
+        FireDecision::NoOp => "no-op",
+        FireDecision::Notify => "notify",
+        FireDecision::Activate { .. } => "activate",
+        FireDecision::MarkMissed => "missed",
+        FireDecision::Close { .. } => "close",
+    };
 
-    // We run the match and if it errors, we STILL want to write the log line if we constructed one
+    // We run the match and if it errors, we STILL want to record the fire if we got this far
     // (especially if it was refused, where check_plan_file_security logs the refusal inside activate_block).
+    let mut detail = String::new();
     let result = match decision {
         FireDecision::NoOp => {
-            log_line.push_str(" no-op");
+            detail.push_str("no-op");
             Ok(())
         }
         FireDecision::Notify => {
-            log_notify(context, &plan.blocks[index], &mut log_line);
+            log_notify(context, &plan.blocks[index], &mut detail);
             Ok(())
         }
         FireDecision::Activate { run } => {
-            activate_block(context, &mut plan, index, run, &mut log_line)
+            activate_block(context, &mut plan, index, run, &mut detail)
         }
-        FireDecision::MarkMissed => mark_missed(context.store, &mut plan, index, &mut log_line),
+        FireDecision::MarkMissed => mark_missed(context.store, &mut plan, index, &mut detail),
         FireDecision::Close { status } => {
-            close_block(context.store, &mut plan, index, status, &mut log_line)
+            close_block(context.store, &mut plan, index, status, &mut detail)
         }
     };
 
-    append_fire_log(context.store, &log_line)?;
+    let record = FireRecord {
+        ts: context.clock.now().timestamp(),
+        date: args.date.clone(),
+        id: args.id.clone(),
+        event: args.event,
+        outcome: outcome.to_owned(),
+        detail: detail.trim().to_owned(),
+    };
+    append_fire_record(context.store, &record)?;
     result
 }
 
@@ -1122,9 +1171,10 @@ fn close_block(
     mark_block(store, plan, index, status, " closed", log_line)
 }
 
-fn append_fire_log(store: &Store, line: &str) -> Result<()> {
+fn append_fire_record(store: &Store, record: &FireRecord) -> Result<()> {
     let path = store.fire_log_path();
     ensure_parent(&path)?;
+    let line = serde_json::to_string(record)?;
     let mut file = OpenOptions::new().create(true).append(true).open(&path)?;
     writeln!(file, "{line}")?;
     file.sync_all()?;

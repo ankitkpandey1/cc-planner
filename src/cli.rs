@@ -36,6 +36,7 @@ pub enum Commands {
     Agenda(AgendaArgs),
     Apply(ApplyArgs),
     Fire(FireArgs),
+    Log(LogArgs),
     Status,
     Doctor,
     Completions(CompletionsArgs),
@@ -160,6 +161,19 @@ pub struct FireArgs {
     pub at: Timestamp,
     #[arg(long)]
     pub dry_run: bool,
+}
+
+/// `log` reads the fire ledger — what the scheduler actually did — for close-the-loop re-planning.
+#[derive(Debug, Args)]
+pub struct LogArgs {
+    /// Only show fires for this plan date.
+    #[arg(long)]
+    pub date: Option<PlanDate>,
+    /// Only show fires at or after this RFC 3339 timestamp (e.g. what fired since you last looked).
+    #[arg(long)]
+    pub since: Option<Timestamp>,
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(Debug, Args)]

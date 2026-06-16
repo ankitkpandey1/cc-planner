@@ -68,6 +68,30 @@ impl Store {
         self.log_dir().join("fire.log")
     }
 
+    /// Reads the append-only fire ledger as structured records, oldest first.
+    ///
+    /// Each line is one JSON [`FireRecord`]. A missing ledger is an empty history, not an error —
+    /// nothing has fired yet. This is the read side of close-the-loop: an agent calls it to see what
+    /// the scheduler actually did and re-plan accordingly.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] if the ledger exists but cannot be read or a line is not valid JSON.
+    pub fn read_fire_log(&self) -> Result<Vec<FireRecord>, StoreError> {
+        let path = self.fire_log_path();
+        let Some(input) = read_state_file(&path)? else {
+            return Ok(Vec::new());
+        };
+        let mut records = Vec::new();
+        for line in input.lines() {
+            if line.trim().is_empty() {
+                continue;
+            }
+            records.push(map_json_result(serde_json::from_str(line), &path)?);
+        }
+        Ok(records)
+    }
+
     /// Acquires the store's exclusive mutation lock.
     ///
     /// # Errors
@@ -459,6 +483,24 @@ pub struct TriggerRecord {
     pub scheduled_at: Timestamp,
 }
 
+/// One entry in the append-only fire ledger: what the scheduler did when a block's event fired.
+///
+/// Written as a single JSON line by the `fire` path and read back by `read_fire_log` / the `log`
+/// command / the `ccplan_fire_log` MCP tool. `outcome` is the coarse category (the [`FireDecision`]
+/// arm); `detail` carries the human-readable specifics (e.g. `run-refused: ...`, `notify-failed=...`).
+///
+/// [`FireDecision`]: crate::lifecycle::FireDecision
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FireRecord {
+    pub ts: Timestamp,
+    pub date: PlanDate,
+    pub id: BlockId,
+    pub event: Event,
+    pub outcome: String,
+    pub detail: String,
+}
+
 #[derive(Debug, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct FiredLedger {
@@ -657,6 +699,41 @@ mod tests {
         atomic_write(&path, b"two").expect("replacement atomic write should succeed");
 
         assert_eq!(fs::read(&path).unwrap(), b"two");
+    }
+
+    #[test]
+    fn read_fire_log_returns_empty_when_no_ledger() {
+        let temp = TempDir::new().unwrap();
+        let store = Store::new(temp.path());
+        assert!(store.read_fire_log().unwrap().is_empty());
+    }
+
+    #[test]
+    fn read_fire_log_parses_records_and_skips_blank_lines() {
+        let temp = TempDir::new().unwrap();
+        let store = Store::new(temp.path());
+        let path = store.fire_log_path();
+        ensure_parent(&path).unwrap();
+        fs::write(
+            &path,
+            "{\"ts\":\"2026-06-08T05:30:00Z\",\"date\":\"2026-06-08\",\"id\":\"focus\",\"event\":\"start\",\"outcome\":\"activate\",\"detail\":\"activated\"}\n\n{\"ts\":\"2026-06-08T06:00:00Z\",\"date\":\"2026-06-08\",\"id\":\"focus\",\"event\":\"end\",\"outcome\":\"close\",\"detail\":\"closed\"}\n",
+        )
+        .unwrap();
+        let records = store.read_fire_log().unwrap();
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].outcome, "activate");
+        assert_eq!(records[0].detail, "activated");
+        assert_eq!(records[1].event, Event::End);
+    }
+
+    #[test]
+    fn read_fire_log_errors_on_malformed_line() {
+        let temp = TempDir::new().unwrap();
+        let store = Store::new(temp.path());
+        let path = store.fire_log_path();
+        ensure_parent(&path).unwrap();
+        fs::write(&path, "not valid json\n").unwrap();
+        assert!(store.read_fire_log().is_err());
     }
 
     #[test]

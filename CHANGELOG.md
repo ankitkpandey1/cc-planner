@@ -8,13 +8,23 @@ This project follows Keep a Changelog and uses Semantic Versioning.
 
 ### Added
 
-- **`ccplan mcp`**: synchronous JSON-RPC 2.0 MCP server over stdio. Exposes 11 tools:
+- **`ccplan mcp`**: synchronous JSON-RPC 2.0 MCP server over stdio. Exposes 12 tools:
   `ccplan_plan_day`, `ccplan_apply`, `ccplan_show_plan`, `ccplan_list_now`, `ccplan_list_next`,
   `ccplan_show_agenda`, `ccplan_add_block`, `ccplan_add_reminder`, `ccplan_mark_block`,
-  `ccplan_edit_block`, `ccplan_remove_block`. No new runtime dependencies — hand-rolled over
-  `serde_json`. Security: `fire`, `mcp`, and `completions` are not exposed as tools; no tool
-  can set `automation.enabled` or modify the allowlist; authoring-time `run:` warnings fire
-  when automation is disabled or the executable isn't allowlisted.
+  `ccplan_edit_block`, `ccplan_remove_block`, `ccplan_fire_log`. No new runtime dependencies —
+  hand-rolled over `serde_json`. Security: `fire`, `mcp`, and `completions` are not exposed as
+  tools; no tool can set `automation.enabled` or modify the allowlist; authoring-time `run:`
+  warnings fire when automation is disabled or the executable isn't allowlisted.
+- **Close the loop**: `ccplan log` (and the `ccplan_fire_log` MCP tool) read the fire ledger — what
+  the scheduler actually did (notify/activate/missed/close) — so an agent can see what fired while
+  it was away and re-plan. Optional `--date` and `--since <rfc3339>` filters; `--json` for machines.
+  Read-only; cannot fire or mutate anything.
+
+### Changed
+
+- The fire ledger (`fire.log`) is now newline-delimited JSON (`{ts, date, id, event, outcome,
+  detail}`) instead of a free-form text line, and each entry is timestamped. This makes the ledger
+  consumable by `ccplan log` / `ccplan_fire_log` rather than write-only.
 
 ## [1.1.0] - 2026-06-15
 
