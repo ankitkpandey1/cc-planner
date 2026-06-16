@@ -1,6 +1,7 @@
 //! Atomic filesystem storage for plans, trigger records, and fired-event state.
 
 use std::{
+    ffi::OsStr,
     fs::{self, File, OpenOptions},
     io::{self, Write},
     path::{Path, PathBuf},
@@ -66,6 +67,80 @@ impl Store {
     #[must_use]
     pub fn fire_log_path(&self) -> PathBuf {
         self.log_dir().join("fire.log")
+    }
+
+    /// Reads the append-only fire ledger as structured records, oldest first.
+    ///
+    /// Each line is one JSON [`FireRecord`]. A missing ledger is an empty history, not an error —
+    /// nothing has fired yet. This is the read side of close-the-loop: an agent calls it to see what
+    /// the scheduler actually did and re-plan accordingly.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] if the ledger exists but cannot be read or a line is not valid JSON.
+    pub fn read_fire_log(&self) -> Result<Vec<FireRecord>, StoreError> {
+        let path = self.fire_log_path();
+        let Some(input) = read_state_file(&path)? else {
+            return Ok(Vec::new());
+        };
+        let mut records = Vec::new();
+        for line in input.lines() {
+            if line.trim().is_empty() {
+                continue;
+            }
+            records.push(map_json_result(serde_json::from_str(line), &path)?);
+        }
+        Ok(records)
+    }
+
+    /// Filesystem path of a named day template (a stored plan TOML). The caller must validate `name`
+    /// is a safe slug — this method does not sanitize path components.
+    #[must_use]
+    pub fn template_path(&self, name: &str) -> PathBuf {
+        self.templates_dir().join(format!("{name}.toml"))
+    }
+
+    /// Saves `contents` (a plan TOML) under template `name`, replacing any existing template.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] if the template directory or file cannot be written.
+    pub fn save_template(&self, name: &str, contents: &str) -> Result<(), StoreError> {
+        atomic_write(&self.template_path(name), contents.as_bytes())
+    }
+
+    /// Reads a named template's raw TOML, or `None` if no such template exists.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] if the template file exists but cannot be read.
+    pub fn load_template(&self, name: &str) -> Result<Option<String>, StoreError> {
+        read_state_file(&self.template_path(name))
+    }
+
+    /// Lists saved template names (file stems), sorted. A missing directory is an empty list.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] if the template directory exists but cannot be read.
+    pub fn list_templates(&self) -> Result<Vec<String>, StoreError> {
+        let dir = self.templates_dir();
+        let entries = match fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(source) => return Err(io_error(&dir, source)),
+        };
+        let mut names = Vec::new();
+        for entry in entries {
+            let path = map_io_result(entry, &dir)?.path();
+            if path.extension().and_then(OsStr::to_str) == Some("toml")
+                && let Some(stem) = path.file_stem().and_then(OsStr::to_str)
+            {
+                names.push(stem.to_owned());
+            }
+        }
+        names.sort();
+        Ok(names)
     }
 
     /// Acquires the store's exclusive mutation lock.
@@ -367,6 +442,10 @@ impl Store {
         self.data.join("log")
     }
 
+    fn templates_dir(&self) -> PathBuf {
+        self.data.join("templates")
+    }
+
     fn lock_path(&self) -> PathBuf {
         self.state.join("store.lock")
     }
@@ -457,6 +536,24 @@ pub struct TriggerRecord {
     pub event: Event,
     pub rev: ScheduleRev,
     pub scheduled_at: Timestamp,
+}
+
+/// One entry in the append-only fire ledger: what the scheduler did when a block's event fired.
+///
+/// Written as a single JSON line by the `fire` path and read back by `read_fire_log` / the `log`
+/// command / the `ccplan_fire_log` MCP tool. `outcome` is the coarse category (the [`FireDecision`]
+/// arm); `detail` carries the human-readable specifics (e.g. `run-refused: ...`, `notify-failed=...`).
+///
+/// [`FireDecision`]: crate::lifecycle::FireDecision
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FireRecord {
+    pub ts: Timestamp,
+    pub date: PlanDate,
+    pub id: BlockId,
+    pub event: Event,
+    pub outcome: String,
+    pub detail: String,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -657,6 +754,79 @@ mod tests {
         atomic_write(&path, b"two").expect("replacement atomic write should succeed");
 
         assert_eq!(fs::read(&path).unwrap(), b"two");
+    }
+
+    #[test]
+    fn read_fire_log_returns_empty_when_no_ledger() {
+        let temp = TempDir::new().unwrap();
+        let store = Store::new(temp.path());
+        assert!(store.read_fire_log().unwrap().is_empty());
+    }
+
+    #[test]
+    fn read_fire_log_parses_records_and_skips_blank_lines() {
+        let temp = TempDir::new().unwrap();
+        let store = Store::new(temp.path());
+        let path = store.fire_log_path();
+        ensure_parent(&path).unwrap();
+        fs::write(
+            &path,
+            "{\"ts\":\"2026-06-08T05:30:00Z\",\"date\":\"2026-06-08\",\"id\":\"focus\",\"event\":\"start\",\"outcome\":\"activate\",\"detail\":\"activated\"}\n\n{\"ts\":\"2026-06-08T06:00:00Z\",\"date\":\"2026-06-08\",\"id\":\"focus\",\"event\":\"end\",\"outcome\":\"close\",\"detail\":\"closed\"}\n",
+        )
+        .unwrap();
+        let records = store.read_fire_log().unwrap();
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].outcome, "activate");
+        assert_eq!(records[0].detail, "activated");
+        assert_eq!(records[1].event, Event::End);
+    }
+
+    #[test]
+    fn read_fire_log_errors_on_malformed_line() {
+        let temp = TempDir::new().unwrap();
+        let store = Store::new(temp.path());
+        let path = store.fire_log_path();
+        ensure_parent(&path).unwrap();
+        fs::write(&path, "not valid json\n").unwrap();
+        assert!(store.read_fire_log().is_err());
+    }
+
+    #[test]
+    fn templates_round_trip_save_load_and_list() {
+        let temp = TempDir::new().unwrap();
+        let store = Store::new(temp.path());
+
+        // No directory yet: listing is empty, loading is None.
+        assert!(store.list_templates().unwrap().is_empty());
+        assert!(store.load_template("morning").unwrap().is_none());
+
+        store.save_template("morning", "date = \"x\"\n").unwrap();
+        store.save_template("evening", "date = \"y\"\n").unwrap();
+        // Re-saving replaces in place.
+        store.save_template("morning", "date = \"z\"\n").unwrap();
+        // A stray non-toml file in the directory is ignored by the listing.
+        fs::write(store.templates_dir().join("README.txt"), b"ignore me").unwrap();
+
+        assert_eq!(
+            store.load_template("morning").unwrap().as_deref(),
+            Some("date = \"z\"\n")
+        );
+        assert_eq!(
+            store.list_templates().unwrap(),
+            vec!["evening".to_owned(), "morning".to_owned()]
+        );
+    }
+
+    #[test]
+    fn list_templates_reports_io_error_when_dir_path_is_a_file() {
+        let temp = TempDir::new().unwrap();
+        let store = Store::new(temp.path());
+        // Block the templates directory with a regular file so read_dir fails with a
+        // non-NotFound error (NotADirectory), exercising the error arm.
+        ensure_parent(&store.templates_dir().join("placeholder")).unwrap();
+        fs::remove_dir(store.templates_dir()).unwrap();
+        fs::write(store.templates_dir(), b"not a directory").unwrap();
+        assert!(store.list_templates().is_err());
     }
 
     #[test]

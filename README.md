@@ -151,6 +151,8 @@ An agent authors the whole day in one shot by piping TOML into `ccplan set --fro
 | `ccplan edit <id> [--start …] [--title …] …` | Patch a non-terminal block. |
 | `ccplan rm <id>` | Remove a pending block. |
 | `ccplan done <id>` / `ccplan skip <id>` | Mark a block complete / skipped. |
+| `ccplan snooze <id> --by 10m` | Push a non-terminal block later and re-apply (refused if it would cross midnight). |
+| `ccplan template save\|apply <name> [--date]` / `ccplan template list` | Capture a day shape once, then stamp it onto any date (statuses reset, then applied). |
 | `ccplan clear --yes` | Archive the day and remove its triggers (`--purge` to delete instead). |
 
 **Reading** — all support `--json`
@@ -161,6 +163,10 @@ An agent authors the whole day in one shot by piping TOML into `ccplan set --fro
 | `ccplan now` | Array of blocks active right now. |
 | `ccplan next` | Array of the next upcoming block(s). |
 | `ccplan agenda` | Remaining blocks with countdowns. |
+| `ccplan log [--date <d>] [--since <rfc3339>]` | The fire ledger — what the scheduler actually did (notify/activate/missed/close). |
+
+`ccplan watch [--every <dur>]` is a live, auto-refreshing view of the agenda for leaving open in a
+terminal (human-only, no `--json`; default refresh `30s`; Ctrl-C or Enter to quit).
 
 **System**
 
@@ -176,6 +182,55 @@ An agent authors the whole day in one shot by piping TOML into `ccplan set --fro
 **Exit codes:** `0` ok · `2` usage/validation · `3` not found · `4` scheduler failure ·
 `5` automation refused · `6` history conflict (needs `--override-history`). No command is ever
 interactive; destructive ones require an explicit flag (`--yes`, `--override-history`).
+
+---
+
+## MCP server
+
+`ccplan mcp` starts a synchronous [Model Context Protocol](https://modelcontextprotocol.io)
+server over stdio (JSON-RPC 2.0, newline-delimited). Wire it into any MCP host:
+
+```json
+{
+  "mcpServers": {
+    "ccplan": {
+      "command": "ccplan",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+**Exposed tools** (16 total):
+
+| Tool | What it does |
+|---|---|
+| `ccplan_plan_day` | Replace the whole day from a JSON blocks array |
+| `ccplan_apply` | Reconcile OS triggers to match the current plan |
+| `ccplan_show_plan` | Return the full plan as JSON |
+| `ccplan_list_now` | Blocks active right now (`[]` if none) |
+| `ccplan_list_next` | Next upcoming block(s) (`[]` if none) |
+| `ccplan_show_agenda` | Remaining blocks with countdowns |
+| `ccplan_add_block` | Add or update one block |
+| `ccplan_add_reminder` | One-shot relative reminder (add + apply) |
+| `ccplan_mark_block` | Mark a block done or skipped |
+| `ccplan_edit_block` | Patch title, time, notify, or run on a non-terminal block |
+| `ccplan_remove_block` | Remove a pending block |
+| `ccplan_snooze_block` | Push a non-terminal block later by a duration and re-apply |
+| `ccplan_save_template` | Save the plan for a date as a named, reusable day template |
+| `ccplan_list_templates` | List saved template names |
+| `ccplan_apply_template` | Instantiate a template onto a date (statuses reset) and apply |
+| `ccplan_fire_log` | Read the fire ledger — what fired while you were away (`[]` if none) |
+
+**Close the loop.** `ccplan_fire_log` is the read side of the agent loop: the scheduler fires
+blocks on real OS time, and the agent calls `ccplan_fire_log` (optionally `since` the last time it
+looked) to see what actually happened — what notified, what `run:` activated, what was missed — and
+re-plans from there. Each entry is `{ ts, date, id, event, outcome, detail }`. It's read-only: it
+observes history and never fires anything.
+
+`fire`, `mcp`, and `completions` are **never** exposed as MCP tools. No tool can modify
+`automation.enabled` or the allowlist. When a `run:` command is stored but would not execute
+(automation disabled or executable not allowlisted), the tool result includes a `WARNING` line.
 
 ---
 

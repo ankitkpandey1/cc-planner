@@ -17,16 +17,21 @@ pub(crate) fn command() -> Command {
         .subcommand(block_target_command("rm"))
         .subcommand(block_target_command("done"))
         .subcommand(block_target_command("skip"))
+        .subcommand(snooze_command())
         .subcommand(clear_command())
         .subcommand(read_command("show"))
         .subcommand(read_command("now"))
         .subcommand(read_command("next"))
         .subcommand(read_command("agenda"))
+        .subcommand(watch_command())
         .subcommand(apply_command())
         .subcommand(fire_command())
+        .subcommand(log_command())
+        .subcommand(template_command())
         .subcommand(Command::new("status"))
         .subcommand(Command::new("doctor"))
         .subcommand(completions_command())
+        .subcommand(Command::new("mcp"))
 }
 
 fn set_command() -> Command {
@@ -77,6 +82,13 @@ fn block_target_command(name: &'static str) -> Command {
     Command::new(name).arg(Arg::new("id").required(true).value_name(ID))
 }
 
+fn snooze_command() -> Command {
+    Command::new("snooze")
+        .arg(Arg::new("id").required(true).value_name(ID))
+        .arg(Arg::new("by").long("by").required(true))
+        .arg(date_arg())
+}
+
 fn clear_command() -> Command {
     Command::new("clear")
         .arg(date_arg())
@@ -87,6 +99,12 @@ fn clear_command() -> Command {
 
 fn read_command(name: &'static str) -> Command {
     Command::new(name).arg(date_arg()).arg(flag("json", "json"))
+}
+
+fn watch_command() -> Command {
+    Command::new("watch")
+        .arg(date_arg())
+        .arg(Arg::new("every").long("every").default_value("30s"))
 }
 
 fn apply_command() -> Command {
@@ -108,6 +126,26 @@ fn fire_command() -> Command {
         .arg(Arg::new("rev").long("rev").required(true))
         .arg(Arg::new("at").long("at").required(true))
         .arg(flag("dry_run", "dry-run"))
+}
+
+fn log_command() -> Command {
+    Command::new("log")
+        .arg(date_arg())
+        .arg(Arg::new("since").long("since"))
+        .arg(flag("json", "json"))
+}
+
+fn template_command() -> Command {
+    Command::new("template")
+        .subcommand(template_name_command("save"))
+        .subcommand(Command::new("list"))
+        .subcommand(template_name_command("apply"))
+}
+
+fn template_name_command(name: &'static str) -> Command {
+    Command::new(name)
+        .arg(Arg::new("name").required(true).value_name("NAME"))
+        .arg(date_arg())
 }
 
 fn completions_command() -> Command {

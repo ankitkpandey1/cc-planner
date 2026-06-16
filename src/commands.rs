@@ -15,8 +15,9 @@ use serde::Serialize;
 
 use crate::{
     cli::{
-        AddArgs, AgendaArgs, ApplyArgs, ClearArgs, Cli, Commands, EditArgs, FireArgs, ReadArgs,
-        RemindArgs, SetArgs, Shell,
+        AddArgs, AgendaArgs, ApplyArgs, ClearArgs, Cli, Commands, EditArgs, FireArgs, LogArgs,
+        ReadArgs, RemindArgs, SetArgs, Shell, SnoozeArgs, TemplateArgs, TemplateCommand,
+        TemplateNameArgs, WatchArgs,
     },
     config::AutomationConfig,
     context::{ContextRefs, Notification, Scheduler},
@@ -26,7 +27,7 @@ use crate::{
         Block, BlockId, ClockTime, DurationSpec, Lead, Plan, PlanDate, Run, Span, Status,
         TimeZoneName,
     },
-    store::{FiredEventKey, FiredStatus, HistoryPolicy, Store, TriggerRecord},
+    store::{FireRecord, FiredEventKey, FiredStatus, HistoryPolicy, Store, TriggerRecord},
     time::{resolve_block_end, resolve_block_start},
 };
 
@@ -44,29 +45,44 @@ pub fn dispatch(
         Some(Commands::Rm(args)) => remove(&args.id, context),
         Some(Commands::Done(args)) => set_status(args.id, Status::Done, context),
         Some(Commands::Skip(args)) => set_status(args.id, Status::Skipped, context),
+        Some(Commands::Snooze(args)) => snooze(args, out, context),
         Some(Commands::Clear(args)) => clear(args, out, context),
         Some(Commands::Show(args)) => show(args, out, context),
         Some(Commands::Now(args)) => now(args, out, context),
         Some(Commands::Next(args)) => next(args, out, context),
         Some(Commands::Agenda(args)) => agenda(args, out, context),
+        Some(Commands::Watch(args)) => watch(args, out, context),
         Some(Commands::Apply(args)) => apply(args, out, context),
         Some(Commands::Fire(args)) => fire(&args, out, context),
+        Some(Commands::Log(args)) => fire_log(args, out, context),
+        Some(Commands::Template(args)) => template(args, out, context),
         Some(Commands::Status) => status(out, context),
         Some(Commands::Doctor) => doctor(out, context),
         Some(Commands::Completions(args)) => {
             completions(args.shell, out);
             Ok(())
         }
+        Some(Commands::Mcp(_args)) => crate::mcp::run_mcp_server(context),
     }
 }
 
 fn set(args: SetArgs, out: &mut dyn Write, context: &ContextRefs<'_>) -> Result<()> {
     let input = read_plan_input(&args.from)?;
-    let mut plan = Plan::from_toml_with_default(&input, context.config.notify.default_lead)?;
-    if let Some(date) = args.date {
+    set_from_str(&input, args.date, args.override_history, out, context)
+}
+
+pub(crate) fn set_from_str(
+    input: &str,
+    date: Option<PlanDate>,
+    override_history: bool,
+    out: &mut dyn Write,
+    context: &ContextRefs<'_>,
+) -> Result<()> {
+    let mut plan = Plan::from_toml_with_default(input, context.config.notify.default_lead)?;
+    if let Some(date) = date {
         plan.date = date;
     }
-    let policy = if args.override_history {
+    let policy = if override_history {
         HistoryPolicy::Override
     } else {
         HistoryPolicy::Preserve
@@ -256,6 +272,138 @@ fn set_status(id: BlockId, status: Status, context: &ContextRefs<'_>) -> Result<
     })
 }
 
+/// Pushes a non-terminal block later by a duration, then re-applies so OS triggers track the slide.
+///
+/// Sliding `start` (and, for an absolute-`end` span, `end` too, preserving the block's length) changes
+/// the block's `schedule_rev`, so `apply` reconciles the stale triggers for the old time away and arms
+/// the new ones in one command. Per NG8 (no rollover) a snooze that would cross midnight is refused
+/// rather than silently wrapping into the next day.
+fn snooze(args: SnoozeArgs, out: &mut dyn Write, context: &ContextRefs<'_>) -> Result<()> {
+    let SnoozeArgs { id, by, date } = args;
+    let date = date.unwrap_or_else(|| today(context));
+    let by_minutes = by.as_seconds() / 60;
+    update_plan(context, &date, |existing| {
+        let mut plan = required_plan(existing, &date)?;
+        let block = find_block_mut(&mut plan, &id)?;
+        ensure_non_terminal(block)?;
+        block.start = snooze_clock(block.start, by_minutes)?;
+        if let Span::End(end) = block.span {
+            block.span = Span::End(snooze_clock(end, by_minutes)?);
+        }
+        Ok(plan)
+    })?;
+    writeln!(out, "snoozed {id} by {by} on {date}")?;
+    apply(
+        ApplyArgs {
+            date: Some(date),
+            dry_run: false,
+        },
+        out,
+        context,
+    )
+}
+
+/// Shifts a wall-clock time `by_minutes` later, refusing a slide that would leave the day (Inv: NG8).
+fn snooze_clock(time: ClockTime, by_minutes: u32) -> Result<ClockTime> {
+    let shifted = u32::from(time.minutes_since_midnight()) + by_minutes;
+    u16::try_from(shifted)
+        .ok()
+        .and_then(|minutes| ClockTime::from_minutes_since_midnight(minutes).ok())
+        .ok_or_else(|| {
+            Error::Usage(format!(
+                "snooze would move {time} past midnight; keep the block within the same day"
+            ))
+        })
+}
+
+/// Dispatches the `template` subcommands (save / list / apply).
+fn template(args: TemplateArgs, out: &mut dyn Write, context: &ContextRefs<'_>) -> Result<()> {
+    match args.command {
+        TemplateCommand::Save(name_args) => template_save(name_args, out, context),
+        TemplateCommand::List => template_list(out, context),
+        TemplateCommand::Apply(name_args) => template_apply(name_args, out, context),
+    }
+}
+
+/// Saves the plan for a date as a named, reusable template (its plain TOML).
+fn template_save(
+    args: TemplateNameArgs,
+    out: &mut dyn Write,
+    context: &ContextRefs<'_>,
+) -> Result<()> {
+    let name = validate_template_name(&args.name)?;
+    let date = args.date.unwrap_or_else(|| today(context));
+    let plan = load_required(context.store, &date, context.config.notify.default_lead)?;
+    context.store.save_template(&name, &plan.to_toml()?)?;
+    writeln!(out, "saved template {name} from {date}")?;
+    Ok(())
+}
+
+/// Lists saved template names, one per line (or a plain-language line when none exist).
+fn template_list(out: &mut dyn Write, context: &ContextRefs<'_>) -> Result<()> {
+    let names = context.store.list_templates()?;
+    if names.is_empty() {
+        writeln!(out, "no templates saved")?;
+    } else {
+        for name in names {
+            writeln!(out, "{name}")?;
+        }
+    }
+    Ok(())
+}
+
+/// Instantiates a template onto a date and applies it.
+///
+/// The stored shape is stamped with the target date and every block is reset to `pending`, so a
+/// template captured from a lived-in day starts fresh. Persisting uses the preserve-history policy
+/// like `set`, so instantiating over a day that already holds terminal blocks is refused (exit 6)
+/// rather than silently erasing history.
+fn template_apply(
+    args: TemplateNameArgs,
+    out: &mut dyn Write,
+    context: &ContextRefs<'_>,
+) -> Result<()> {
+    let name = validate_template_name(&args.name)?;
+    let date = args.date.unwrap_or_else(|| today(context));
+    let toml = context
+        .store
+        .load_template(&name)?
+        .ok_or_else(|| Error::NotFound(format!("template `{name}`")))?;
+    let mut plan = Plan::from_toml_with_default(&toml, context.config.notify.default_lead)?;
+    plan.date = date.clone();
+    for block in &mut plan.blocks {
+        block.status = Status::Pending;
+    }
+    persist_plan(context, &plan)?;
+    writeln!(out, "applied template {name} to {date}")?;
+    apply(
+        ApplyArgs {
+            date: Some(date),
+            dry_run: false,
+        },
+        out,
+        context,
+    )
+}
+
+/// Validates a template name is a safe slug: non-empty, only ASCII letters, digits, `-` or `_`.
+///
+/// This is the path-traversal guard — rejecting `/`, `.`, and `..` keeps `template_path` from
+/// escaping the templates directory.
+fn validate_template_name(name: &str) -> Result<String> {
+    if !name.is_empty()
+        && name
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
+    {
+        Ok(name.to_owned())
+    } else {
+        Err(Error::Usage(format!(
+            "template name must be non-empty and use only letters, digits, '-' or '_': {name:?}"
+        )))
+    }
+}
+
 fn clear(args: ClearArgs, out: &mut dyn Write, context: &ContextRefs<'_>) -> Result<()> {
     if !args.yes {
         return Err(Error::Usage("clear requires --yes".to_owned()));
@@ -353,6 +501,133 @@ fn agenda(args: AgendaArgs, out: &mut dyn Write, context: &ContextRefs<'_>) -> R
     write_read_rows(out, args.json, &blocks, "nothing left on today's agenda")
 }
 
+/// One terminal-clear escape (`ESC[2J`) plus cursor-home (`ESC[H`) — redraws a watch frame in place.
+const WATCH_CLEAR: &str = "\x1b[2J\x1b[H";
+
+/// What the refresh driver tells the [`watch_loop`] to do after a frame is drawn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WatchSignal {
+    /// Redraw the agenda (the timer elapsed).
+    Refresh,
+    /// Stop watching (the user interrupted, or input/EOF arrived).
+    Quit,
+}
+
+/// The loop's only side-effecting dependency: blocks until the next [`WatchSignal`]. Real watching
+/// waits on a timer and on terminal input (see `RealWatchClock`); tests inject a scripted driver so
+/// the loop body stays fully covered without sleeping or a live terminal.
+trait WatchClock {
+    fn wait(&mut self) -> WatchSignal;
+}
+
+/// Renders the live agenda, then redraws it each time the driver signals `Refresh`, returning when
+/// it signals `Quit`. Pure aside from `out` and the injected driver — fully tested.
+fn watch_loop(
+    date: Option<PlanDate>,
+    out: &mut dyn Write,
+    context: &ContextRefs<'_>,
+    clock: &mut dyn WatchClock,
+) -> Result<()> {
+    let date = date.unwrap_or_else(|| today(context));
+    loop {
+        let frame = render_watch_frame(context, &date)?;
+        write!(out, "{WATCH_CLEAR}{frame}")?;
+        out.flush()?;
+        if clock.wait() == WatchSignal::Quit {
+            return Ok(());
+        }
+    }
+}
+
+/// Builds one watch frame: a header (date + wall-clock time + quit hint) above the live agenda
+/// table, reusing `agenda`'s human rendering verbatim so the two views never drift. Pure (tested).
+fn render_watch_frame(context: &ContextRefs<'_>, date: &PlanDate) -> Result<String> {
+    let wall = context.clock.now().strftime("%H:%M:%S");
+    let mut buf: Vec<u8> = Vec::new();
+    writeln!(buf, "ccplan watch · {date} · {wall}")?;
+    writeln!(buf, "(Ctrl-C or Enter to quit)")?;
+    writeln!(buf)?;
+    let args = AgendaArgs {
+        date: Some(date.clone()),
+        json: false,
+    };
+    agenda(args, &mut buf, context)?;
+    Ok(String::from_utf8(buf).expect("agenda renders valid UTF-8"))
+}
+
+/// Drives [`watch_loop`] in production: a background thread reads terminal input while the main
+/// thread waits on a channel with the refresh interval as its timeout. A timeout means "redraw";
+/// any line, EOF, or a closed channel means "quit". This is the genuine timer/thread/stdin IO
+/// boundary — excluded from coverage; the loop logic it feeds lives in the tested `watch_loop`.
+struct RealWatchClock {
+    interval: std::time::Duration,
+    quit: std::sync::mpsc::Receiver<()>,
+}
+
+#[cfg_attr(coverage_nightly, coverage(off))]
+impl RealWatchClock {
+    fn spawn(interval: std::time::Duration) -> Self {
+        let (tx, quit) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut line = String::new();
+            // One read is enough: a line, or EOF, both mean "stop watching".
+            let _ = std::io::stdin().read_line(&mut line);
+            let _ = tx.send(());
+        });
+        Self { interval, quit }
+    }
+}
+
+#[cfg_attr(coverage_nightly, coverage(off))]
+impl WatchClock for RealWatchClock {
+    fn wait(&mut self) -> WatchSignal {
+        use std::sync::mpsc::RecvTimeoutError;
+        match self.quit.recv_timeout(self.interval) {
+            Err(RecvTimeoutError::Timeout) => WatchSignal::Refresh,
+            Ok(()) | Err(RecvTimeoutError::Disconnected) => WatchSignal::Quit,
+        }
+    }
+}
+
+/// Live, auto-refreshing read-only agenda. Wires the real timer/input driver into `watch_loop`.
+#[cfg_attr(coverage_nightly, coverage(off))]
+fn watch(args: WatchArgs, out: &mut dyn Write, context: &ContextRefs<'_>) -> Result<()> {
+    let interval = std::time::Duration::from_secs(u64::from(args.every.as_seconds()));
+    let mut clock = RealWatchClock::spawn(interval);
+    watch_loop(args.date, out, context, &mut clock)
+}
+
+/// Reads the fire ledger — what the scheduler actually did — newest filters applied.
+///
+/// The read side of close-the-loop: optionally narrow to one `--date` or to fires at/after a
+/// `--since` timestamp, then emit machine `--json` or a scannable human table. A missing ledger is
+/// an empty history, not an error.
+fn fire_log(args: LogArgs, out: &mut dyn Write, context: &ContextRefs<'_>) -> Result<()> {
+    let LogArgs { date, since, json } = args;
+    let mut records = context.store.read_fire_log()?;
+    if let Some(date) = &date {
+        records.retain(|record| &record.date == date);
+    }
+    if let Some(since) = since {
+        records.retain(|record| record.ts >= since);
+    }
+    if json {
+        serde_json::to_writer_pretty(&mut *out, &records)?;
+        writeln!(out)?;
+    } else if records.is_empty() {
+        writeln!(out, "no fires recorded")?;
+    } else {
+        for record in &records {
+            let line = format!(
+                "{}  {} {} {}  {}  {}",
+                record.ts, record.date, record.id, record.event, record.outcome, record.detail
+            );
+            writeln!(out, "{line}")?;
+        }
+    }
+    Ok(())
+}
+
 fn apply(args: ApplyArgs, out: &mut dyn Write, context: &ContextRefs<'_>) -> Result<()> {
     let date = args.date.unwrap_or_else(|| today(context));
     // `apply` is a mutation point and persists overdue reconciliation; `--dry-run` is a preview and
@@ -417,29 +692,46 @@ fn fire(args: &FireArgs, out: &mut dyn Write, context: &ContextRefs<'_>) -> Resu
         return Ok(());
     }
 
-    let mut log_line = format!("{} {} {}", args.date, args.id, args.event);
+    // The coarse outcome category comes straight from the decision arm; `detail` carries the
+    // human-readable specifics each handler appends (e.g. `run-refused: ...`, `notify-failed=...`).
+    let outcome = match &decision {
+        FireDecision::NoOp => "no-op",
+        FireDecision::Notify => "notify",
+        FireDecision::Activate { .. } => "activate",
+        FireDecision::MarkMissed => "missed",
+        FireDecision::Close { .. } => "close",
+    };
 
-    // We run the match and if it errors, we STILL want to write the log line if we constructed one
+    // We run the match and if it errors, we STILL want to record the fire if we got this far
     // (especially if it was refused, where check_plan_file_security logs the refusal inside activate_block).
+    let mut detail = String::new();
     let result = match decision {
         FireDecision::NoOp => {
-            log_line.push_str(" no-op");
+            detail.push_str("no-op");
             Ok(())
         }
         FireDecision::Notify => {
-            log_notify(context, &plan.blocks[index], &mut log_line);
+            log_notify(context, &plan.blocks[index], &mut detail);
             Ok(())
         }
         FireDecision::Activate { run } => {
-            activate_block(context, &mut plan, index, run, &mut log_line)
+            activate_block(context, &mut plan, index, run, &mut detail)
         }
-        FireDecision::MarkMissed => mark_missed(context.store, &mut plan, index, &mut log_line),
+        FireDecision::MarkMissed => mark_missed(context.store, &mut plan, index, &mut detail),
         FireDecision::Close { status } => {
-            close_block(context.store, &mut plan, index, status, &mut log_line)
+            close_block(context.store, &mut plan, index, status, &mut detail)
         }
     };
 
-    append_fire_log(context.store, &log_line)?;
+    let record = FireRecord {
+        ts: context.clock.now().timestamp(),
+        date: args.date.clone(),
+        id: args.id.clone(),
+        event: args.event,
+        outcome: outcome.to_owned(),
+        detail: detail.trim().to_owned(),
+    };
+    append_fire_record(context.store, &record)?;
     result
 }
 
@@ -1111,9 +1403,10 @@ fn close_block(
     mark_block(store, plan, index, status, " closed", log_line)
 }
 
-fn append_fire_log(store: &Store, line: &str) -> Result<()> {
+fn append_fire_record(store: &Store, record: &FireRecord) -> Result<()> {
     let path = store.fire_log_path();
     ensure_parent(&path)?;
+    let line = serde_json::to_string(record)?;
     let mut file = OpenOptions::new().create(true).append(true).open(&path)?;
     writeln!(file, "{line}")?;
     file.sync_all()?;
@@ -1176,7 +1469,7 @@ fn ensure_non_terminal(block: &Block) -> Result<()> {
     }
 }
 
-fn slug_block_id(title: &str) -> Result<BlockId> {
+pub(crate) fn slug_block_id(title: &str) -> Result<BlockId> {
     let mut slug = String::new();
     let mut last_dash = false;
     for ch in title.chars().flat_map(char::to_lowercase) {
@@ -1355,6 +1648,120 @@ mod read_output_tests {
     fn agenda_entry_row_includes_countdown_column() {
         let header = <super::AgendaEntry as HumanRow>::header();
         assert_eq!(header, &["TIME", "IN", "STATUS", "ID", "TITLE"]);
+    }
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod watch_tests {
+    use super::{WATCH_CLEAR, WatchClock, WatchSignal, render_watch_frame, watch_loop};
+    use crate::{
+        config::Config,
+        context::{Context, RecordingNotifier, RecordingScheduler},
+        model::Plan,
+        store::{HistoryPolicy, Store},
+        time::FixedClock,
+    };
+    use assert_fs::TempDir;
+    use jiff::Zoned;
+
+    /// A scripted refresh driver: replays a fixed signal sequence, then quits. No timer, no input.
+    struct ScriptedClock {
+        signals: std::vec::IntoIter<WatchSignal>,
+    }
+
+    impl WatchClock for ScriptedClock {
+        fn wait(&mut self) -> WatchSignal {
+            self.signals.next().unwrap_or(WatchSignal::Quit)
+        }
+    }
+
+    fn context_at(
+        now: &str,
+    ) -> (
+        TempDir,
+        Context<FixedClock, RecordingScheduler, RecordingNotifier>,
+    ) {
+        let temp = TempDir::new().unwrap();
+        let store = Store::new(temp.path());
+        let clock = FixedClock::new(now.parse::<Zoned>().unwrap());
+        let context = Context::new(
+            store,
+            clock,
+            RecordingScheduler::default(),
+            RecordingNotifier::default(),
+            Config::default(),
+        );
+        let plan = Plan::from_toml(
+            r#"
+date = "2026-06-08"
+timezone = "Asia/Kolkata"
+
+[[block]]
+id = "focus"
+title = "Focus time"
+start = "11:00"
+end = "11:30"
+status = "pending"
+"#,
+        )
+        .unwrap();
+        context
+            .store
+            .set_plan(&plan, HistoryPolicy::Preserve)
+            .unwrap();
+        (temp, context)
+    }
+
+    #[test]
+    fn watch_loop_redraws_each_refresh_and_stops_on_quit() {
+        let (_temp, context) = context_at("2026-06-08T10:50:00+05:30[Asia/Kolkata]");
+        let refs = context.as_refs();
+        let mut out = Vec::new();
+        let mut driver = ScriptedClock {
+            // Refresh draws a second frame; Quit ends the loop after it.
+            signals: vec![WatchSignal::Refresh, WatchSignal::Quit].into_iter(),
+        };
+
+        watch_loop(None, &mut out, &refs, &mut driver).unwrap();
+
+        let text = String::from_utf8(out).unwrap();
+        assert_eq!(
+            text.matches("ccplan watch ·").count(),
+            2,
+            "two frames: {text}"
+        );
+        assert!(
+            text.contains(WATCH_CLEAR),
+            "frames clear the screen: {text}"
+        );
+    }
+
+    #[test]
+    fn render_watch_frame_carries_header_clock_and_live_agenda() {
+        let (_temp, context) = context_at("2026-06-08T10:50:00+05:30[Asia/Kolkata]");
+        let refs = context.as_refs();
+
+        let frame = render_watch_frame(&refs, &"2026-06-08".parse().unwrap()).unwrap();
+
+        assert!(
+            frame.starts_with("ccplan watch · 2026-06-08 · 10:50:00"),
+            "{frame}"
+        );
+        assert!(frame.contains("Ctrl-C or Enter to quit"), "{frame}");
+        // The block is active at 11:10, so the live agenda row renders inside the frame.
+        assert!(frame.contains("Focus time"), "{frame}");
+    }
+
+    #[test]
+    fn render_watch_frame_shows_empty_agenda_when_nothing_remains() {
+        // After the only block has ended, the frame still draws but the agenda is empty.
+        let (_temp, context) = context_at("2026-06-08T23:00:00+05:30[Asia/Kolkata]");
+        let refs = context.as_refs();
+
+        let frame = render_watch_frame(&refs, &"2026-06-08".parse().unwrap()).unwrap();
+
+        assert!(frame.contains("nothing left on today's agenda"), "{frame}");
     }
 }
 

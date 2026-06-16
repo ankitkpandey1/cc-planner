@@ -6,6 +6,39 @@ This project follows Keep a Changelog and uses Semantic Versioning.
 
 ## [Unreleased]
 
+### Added
+
+- **`ccplan mcp`**: synchronous JSON-RPC 2.0 MCP server over stdio. Exposes 16 tools:
+  `ccplan_plan_day`, `ccplan_apply`, `ccplan_show_plan`, `ccplan_list_now`, `ccplan_list_next`,
+  `ccplan_show_agenda`, `ccplan_add_block`, `ccplan_add_reminder`, `ccplan_mark_block`,
+  `ccplan_edit_block`, `ccplan_remove_block`, `ccplan_snooze_block`, `ccplan_save_template`,
+  `ccplan_list_templates`, `ccplan_apply_template`, `ccplan_fire_log`. No new runtime dependencies —
+  hand-rolled over `serde_json`. Security: `fire`, `mcp`, and `completions` are not exposed as
+  tools; no tool can set `automation.enabled` or modify the allowlist; authoring-time `run:`
+  warnings fire when automation is disabled or the executable isn't allowlisted.
+- **Close the loop**: `ccplan log` (and the `ccplan_fire_log` MCP tool) read the fire ledger — what
+  the scheduler actually did (notify/activate/missed/close) — so an agent can see what fired while
+  it was away and re-plan. Optional `--date` and `--since <rfc3339>` filters; `--json` for machines.
+  Read-only; cannot fire or mutate anything.
+- **`ccplan snooze <id> --by <dur>`** (and the `ccplan_snooze_block` MCP tool): push a non-terminal
+  block later by a duration and re-apply in one step — react to a fire by sliding the block instead
+  of recomputing absolute times. Refused if the slide would cross midnight (no day rollover).
+- **`ccplan template save|list|apply`** (and the `ccplan_save_template` / `ccplan_list_templates` /
+  `ccplan_apply_template` MCP tools): reusable day templates. Capture a day shape once, then stamp it
+  onto any date (every block reset to pending) and apply it in one step. Template names are validated
+  as safe slugs (path-traversal guard). Instantiating over a day with terminal history is refused,
+  like `set`.
+- **`ccplan watch [--every <dur>]`**: a live, auto-refreshing view of the agenda for leaving open in
+  a terminal. Read-only (no scheduling, no `--json`); redraws on the given interval (default `30s`,
+  max 24h) and quits on Ctrl-C or Enter. Not exposed as an MCP tool — agents poll `ccplan_show_agenda`
+  instead.
+
+### Changed
+
+- The fire ledger (`fire.log`) is now newline-delimited JSON (`{ts, date, id, event, outcome,
+  detail}`) instead of a free-form text line, and each entry is timestamped. This makes the ledger
+  consumable by `ccplan log` / `ccplan_fire_log` rather than write-only.
+
 ## [1.1.0] - 2026-06-15
 
 ### Added

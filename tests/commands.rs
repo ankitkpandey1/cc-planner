@@ -29,6 +29,32 @@ fn no_command_is_a_successful_noop() {
 }
 
 #[test]
+fn mcp_subcommand_exits_cleanly_on_eof() {
+    // In test builds run_mcp_server uses an empty Cursor instead of real stdin,
+    // so this exits immediately and produces no output.
+    let (_temp, context) = test_context_at("2026-06-08T10:00:00+05:30[Asia/Kolkata]");
+    let output = run_ok(&context, ["ccplan", "mcp"]);
+    assert!(output.is_empty());
+}
+
+#[test]
+fn watch_renders_a_frame_then_quits_on_eof() {
+    // Under the test harness stdin is closed, so watch's input-reader thread signals quit right
+    // after the first frame — this drives the real timer/input loop end-to-end without hanging,
+    // the same way `mcp` exits on EOF.
+    let (_temp, context) = test_context_at("2026-06-08T10:50:00+05:30[Asia/Kolkata]");
+    context
+        .store
+        .set_plan(&plan(), HistoryPolicy::Preserve)
+        .unwrap();
+
+    let output = String::from_utf8(run_ok(&context, ["ccplan", "watch", "--every", "1s"])).unwrap();
+
+    assert!(output.contains("ccplan watch ·"), "watch frame: {output}");
+    assert!(output.contains("Focus time"), "watch frame: {output}");
+}
+
+#[test]
 fn set_and_show_json_round_trip_with_fake_context() {
     let (_temp, context) = test_context_at("2026-06-08T10:00:00+05:30[Asia/Kolkata]");
     let input = context
@@ -892,11 +918,9 @@ fn fire_start_records_ledger_notifies_updates_status_and_deduplicates() {
     let stored = context.store.load_plan(&date()).unwrap().unwrap();
     assert_eq!(stored.blocks[0].status, Status::Active);
     assert_eq!(context.notifier.notifications().len(), 1);
-    assert!(
-        std::fs::read_to_string(context.store.fire_log_path())
-            .unwrap()
-            .contains("focus start")
-    );
+    let logged = std::fs::read_to_string(context.store.fire_log_path()).unwrap();
+    assert!(logged.contains("\"id\":\"focus\""));
+    assert!(logged.contains("\"event\":\"start\""));
 }
 
 #[test]
@@ -1132,6 +1156,199 @@ where
 
 fn focus_rev<C, S, N>(context: &Context<C, S, N>) -> ccplan::model::ScheduleRev {
     context.store.load_plan(&date()).unwrap().unwrap().blocks[0].schedule_rev()
+}
+
+#[test]
+fn fire_log_reads_the_ledger_with_filters() {
+    // Empty ledger: nothing has fired yet.
+    let (_empty_temp, empty) = test_context_at("2026-06-08T11:00:00+05:30[Asia/Kolkata]");
+    assert_eq!(
+        String::from_utf8(run_ok(&empty, ["ccplan", "log"]))
+            .unwrap()
+            .trim(),
+        "no fires recorded"
+    );
+
+    // Fire a real start event so the ledger holds one activate record.
+    let (_temp, context) = test_context_at("2026-06-08T11:00:00+05:30[Asia/Kolkata]");
+    context
+        .store
+        .set_plan(&plan(), HistoryPolicy::Preserve)
+        .unwrap();
+    let rev = focus_rev(&context);
+    run_ok(
+        &context,
+        fire_args("focus", "start", rev.as_str(), "2026-06-08T05:30:00Z"),
+    );
+
+    // Human table carries the block id and outcome.
+    let human = String::from_utf8(run_ok(&context, ["ccplan", "log"])).unwrap();
+    assert!(human.contains("focus"), "human log: {human}");
+    assert!(human.contains("activate"), "human log: {human}");
+
+    // JSON output is structured.
+    let json = String::from_utf8(run_ok(&context, ["ccplan", "log", "--json"])).unwrap();
+    assert!(
+        json.contains("\"outcome\": \"activate\""),
+        "json log: {json}"
+    );
+
+    // --date keeps a matching date, drops a non-matching one.
+    let matched = String::from_utf8(run_ok(
+        &context,
+        ["ccplan", "log", "--date", "2026-06-08", "--json"],
+    ))
+    .unwrap();
+    assert!(matched.contains("\"id\": \"focus\""), "matched: {matched}");
+    assert_eq!(
+        String::from_utf8(run_ok(&context, ["ccplan", "log", "--date", "2026-06-09"]))
+            .unwrap()
+            .trim(),
+        "no fires recorded"
+    );
+
+    // --since keeps fires at/after the instant, drops earlier ones.
+    let since_before = String::from_utf8(run_ok(
+        &context,
+        ["ccplan", "log", "--since", "2026-06-08T05:00:00Z", "--json"],
+    ))
+    .unwrap();
+    assert!(
+        since_before.contains("\"outcome\": \"activate\""),
+        "since_before: {since_before}"
+    );
+    assert_eq!(
+        String::from_utf8(run_ok(
+            &context,
+            ["ccplan", "log", "--since", "2026-06-08T06:00:00Z"]
+        ))
+        .unwrap()
+        .trim(),
+        "no fires recorded"
+    );
+}
+
+#[test]
+fn snooze_slides_blocks_later_reapplies_and_refuses_rollover() {
+    let (_temp, context) = test_context_at("2026-06-08T10:00:00+05:30[Asia/Kolkata]");
+    context
+        .store
+        .set_plan(&plan(), HistoryPolicy::Preserve)
+        .unwrap();
+
+    // End-span block: both start and end slide, preserving the 30-minute length.
+    let message = String::from_utf8(run_ok(
+        &context,
+        ["ccplan", "snooze", "focus", "--by", "1h"],
+    ))
+    .unwrap();
+    assert!(message.contains("snoozed focus by"), "{message}");
+    assert!(message.contains("2026-06-08"), "{message}");
+    // The re-apply armed native triggers for the moved block.
+    assert!(!context.scheduler.calls().is_empty());
+
+    // Duration-span block: only start slides; the duration is untouched.
+    run_ok(&context, ["ccplan", "snooze", "lunch", "--by", "2h"]);
+
+    let stored = context.store.load_plan(&date()).unwrap().unwrap();
+    let focus = &stored.blocks[0];
+    assert_eq!(focus.start.to_string(), "12:00");
+    assert_eq!(focus.span, Span::End("12:30".parse::<ClockTime>().unwrap()));
+    let lunch = &stored.blocks[1];
+    assert_eq!(lunch.start.to_string(), "16:00");
+    assert_eq!(
+        lunch.span,
+        Span::Duration(DurationSpec::from_seconds(1800).unwrap())
+    );
+
+    // A slide that would cross midnight is refused (NG8: no day rollover).
+    let rollover = run_err(&context, ["ccplan", "snooze", "lunch", "--by", "24h"]);
+    assert!(matches!(rollover, Error::Usage(message) if message.contains("past midnight")));
+
+    // Terminal blocks and unknown ids are refused like the other mutations.
+    run_ok(&context, ["ccplan", "done", "focus"]);
+    assert!(matches!(
+        run_err(&context, ["ccplan", "snooze", "focus", "--by", "5m"]),
+        Error::HistoryConflict { .. }
+    ));
+    assert!(matches!(
+        run_err(&context, ["ccplan", "snooze", "ghost", "--by", "5m"]),
+        Error::NotFound(_)
+    ));
+}
+
+#[test]
+fn template_save_list_apply_round_trip_and_validation() {
+    let (_temp, context) = test_context_at("2026-06-08T10:00:00+05:30[Asia/Kolkata]");
+    context
+        .store
+        .set_plan(&plan(), HistoryPolicy::Preserve)
+        .unwrap();
+    // Mark one block done so the save captures a lived-in day; apply must reset it to pending.
+    run_ok(&context, ["ccplan", "done", "focus"]);
+
+    // Nothing saved yet.
+    assert_eq!(
+        String::from_utf8(run_ok(&context, ["ccplan", "template", "list"]))
+            .unwrap()
+            .trim(),
+        "no templates saved"
+    );
+
+    let saved =
+        String::from_utf8(run_ok(&context, ["ccplan", "template", "save", "weekday"])).unwrap();
+    assert!(
+        saved.contains("saved template weekday from 2026-06-08"),
+        "{saved}"
+    );
+    assert_eq!(
+        String::from_utf8(run_ok(&context, ["ccplan", "template", "list"]))
+            .unwrap()
+            .trim(),
+        "weekday"
+    );
+
+    // Instantiate onto a fresh date: blocks come back, all reset to pending, and triggers are armed.
+    let applied = String::from_utf8(run_ok(
+        &context,
+        [
+            "ccplan",
+            "template",
+            "apply",
+            "weekday",
+            "--date",
+            "2026-06-09",
+        ],
+    ))
+    .unwrap();
+    assert!(
+        applied.contains("applied template weekday to 2026-06-09"),
+        "{applied}"
+    );
+    let instantiated = context
+        .store
+        .load_plan(&"2026-06-09".parse::<PlanDate>().unwrap())
+        .unwrap()
+        .unwrap();
+    assert_eq!(instantiated.blocks.len(), 2);
+    assert!(
+        instantiated
+            .blocks
+            .iter()
+            .all(|b| b.status == Status::Pending)
+    );
+    assert!(!context.scheduler.calls().is_empty());
+
+    // An unsafe name is refused before it can touch the filesystem (path-traversal guard).
+    assert!(matches!(
+        run_err(&context, ["ccplan", "template", "save", "../escape"]),
+        Error::Usage(message) if message.contains("template name must be")
+    ));
+    // Applying a template that does not exist is a not-found error.
+    assert!(matches!(
+        run_err(&context, ["ccplan", "template", "apply", "ghost"]),
+        Error::NotFound(_)
+    ));
 }
 
 fn fire_args(id: &str, event: &str, rev: &str, at: &str) -> Vec<String> {
@@ -1598,11 +1815,9 @@ fn test_fire_dry_run_leaves_ledger_untouched_so_real_fire_still_fires() {
         "the real fire after a dry-run must still activate the block"
     );
     assert_eq!(context.notifier.notifications().len(), 1);
-    assert!(
-        std::fs::read_to_string(context.store.fire_log_path())
-            .unwrap()
-            .contains("focus start")
-    );
+    let logged = std::fs::read_to_string(context.store.fire_log_path()).unwrap();
+    assert!(logged.contains("\"id\":\"focus\""));
+    assert!(logged.contains("\"event\":\"start\""));
 }
 
 #[test]
