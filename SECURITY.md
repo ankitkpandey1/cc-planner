@@ -27,11 +27,13 @@ security issues.
 
 ## MCP Security Model
 
-The `ccplan mcp` server exposes 12 authoring and read tools. The following invariants hold:
+The `ccplan mcp` server exposes 13 authoring and read tools. The following invariants hold:
 
 - `fire`, `mcp`, and `completions` are never exposed as MCP tools.
 - No MCP tool sets `automation.enabled` or modifies the allowlist.
-- No MCP tool calls `authorize_run`; automation is enforced at `fire` time only.
+- No MCP tool calls `authorize_run`; automation is enforced at `fire` time only. `ccplan_snooze_block`
+  only shifts a block's time and re-applies (same surface as authoring + apply); it cannot arm or run
+  a `run:` command.
 - `ccplan_fire_log` is read-only: it returns the existing fire ledger and cannot fire, schedule, or
   mutate anything. Reading history is never an automation path.
 - When a `run:` command is stored via MCP but would not execute (automation disabled or executable

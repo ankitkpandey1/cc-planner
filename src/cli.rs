@@ -29,6 +29,7 @@ pub enum Commands {
     Rm(BlockTarget),
     Done(BlockTarget),
     Skip(BlockTarget),
+    Snooze(SnoozeArgs),
     Clear(ClearArgs),
     Show(ReadArgs),
     Now(ReadArgs),
@@ -109,6 +110,18 @@ pub struct EditArgs {
 #[derive(Debug, Args)]
 pub struct BlockTarget {
     pub id: BlockId,
+}
+
+/// `snooze` pushes a non-terminal block later by a duration, then re-applies (close-the-loop:
+/// react to a fire by sliding the block instead of editing absolute times by hand).
+#[derive(Debug, Args)]
+pub struct SnoozeArgs {
+    pub id: BlockId,
+    /// Shift the block this much later, e.g. `10m`, `1h` (must stay within the same day).
+    #[arg(long = "by")]
+    pub by: DurationSpec,
+    #[arg(long)]
+    pub date: Option<PlanDate>,
 }
 
 #[derive(Debug, Args)]

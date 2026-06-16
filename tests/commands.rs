@@ -1211,6 +1211,55 @@ fn fire_log_reads_the_ledger_with_filters() {
     );
 }
 
+#[test]
+fn snooze_slides_blocks_later_reapplies_and_refuses_rollover() {
+    let (_temp, context) = test_context_at("2026-06-08T10:00:00+05:30[Asia/Kolkata]");
+    context
+        .store
+        .set_plan(&plan(), HistoryPolicy::Preserve)
+        .unwrap();
+
+    // End-span block: both start and end slide, preserving the 30-minute length.
+    let message = String::from_utf8(run_ok(
+        &context,
+        ["ccplan", "snooze", "focus", "--by", "1h"],
+    ))
+    .unwrap();
+    assert!(message.contains("snoozed focus by"), "{message}");
+    assert!(message.contains("2026-06-08"), "{message}");
+    // The re-apply armed native triggers for the moved block.
+    assert!(!context.scheduler.calls().is_empty());
+
+    // Duration-span block: only start slides; the duration is untouched.
+    run_ok(&context, ["ccplan", "snooze", "lunch", "--by", "2h"]);
+
+    let stored = context.store.load_plan(&date()).unwrap().unwrap();
+    let focus = &stored.blocks[0];
+    assert_eq!(focus.start.to_string(), "12:00");
+    assert_eq!(focus.span, Span::End("12:30".parse::<ClockTime>().unwrap()));
+    let lunch = &stored.blocks[1];
+    assert_eq!(lunch.start.to_string(), "16:00");
+    assert_eq!(
+        lunch.span,
+        Span::Duration(DurationSpec::from_seconds(1800).unwrap())
+    );
+
+    // A slide that would cross midnight is refused (NG8: no day rollover).
+    let rollover = run_err(&context, ["ccplan", "snooze", "lunch", "--by", "24h"]);
+    assert!(matches!(rollover, Error::Usage(message) if message.contains("past midnight")));
+
+    // Terminal blocks and unknown ids are refused like the other mutations.
+    run_ok(&context, ["ccplan", "done", "focus"]);
+    assert!(matches!(
+        run_err(&context, ["ccplan", "snooze", "focus", "--by", "5m"]),
+        Error::HistoryConflict { .. }
+    ));
+    assert!(matches!(
+        run_err(&context, ["ccplan", "snooze", "ghost", "--by", "5m"]),
+        Error::NotFound(_)
+    ));
+}
+
 fn fire_args(id: &str, event: &str, rev: &str, at: &str) -> Vec<String> {
     vec![
         "ccplan".to_owned(),

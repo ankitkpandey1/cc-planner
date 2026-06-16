@@ -17,6 +17,7 @@ pub(crate) fn command() -> Command {
         .subcommand(block_target_command("rm"))
         .subcommand(block_target_command("done"))
         .subcommand(block_target_command("skip"))
+        .subcommand(snooze_command())
         .subcommand(clear_command())
         .subcommand(read_command("show"))
         .subcommand(read_command("now"))
@@ -77,6 +78,13 @@ fn edit_command() -> Command {
 
 fn block_target_command(name: &'static str) -> Command {
     Command::new(name).arg(Arg::new("id").required(true).value_name(ID))
+}
+
+fn snooze_command() -> Command {
+    Command::new("snooze")
+        .arg(Arg::new("id").required(true).value_name(ID))
+        .arg(Arg::new("by").long("by").required(true))
+        .arg(date_arg())
 }
 
 fn clear_command() -> Command {

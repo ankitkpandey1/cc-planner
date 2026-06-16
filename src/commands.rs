@@ -16,7 +16,7 @@ use serde::Serialize;
 use crate::{
     cli::{
         AddArgs, AgendaArgs, ApplyArgs, ClearArgs, Cli, Commands, EditArgs, FireArgs, LogArgs,
-        ReadArgs, RemindArgs, SetArgs, Shell,
+        ReadArgs, RemindArgs, SetArgs, Shell, SnoozeArgs,
     },
     config::AutomationConfig,
     context::{ContextRefs, Notification, Scheduler},
@@ -44,6 +44,7 @@ pub fn dispatch(
         Some(Commands::Rm(args)) => remove(&args.id, context),
         Some(Commands::Done(args)) => set_status(args.id, Status::Done, context),
         Some(Commands::Skip(args)) => set_status(args.id, Status::Skipped, context),
+        Some(Commands::Snooze(args)) => snooze(args, out, context),
         Some(Commands::Clear(args)) => clear(args, out, context),
         Some(Commands::Show(args)) => show(args, out, context),
         Some(Commands::Now(args)) => now(args, out, context),
@@ -266,6 +267,50 @@ fn set_status(id: BlockId, status: Status, context: &ContextRefs<'_>) -> Result<
         block.status = status;
         Ok(plan)
     })
+}
+
+/// Pushes a non-terminal block later by a duration, then re-applies so OS triggers track the slide.
+///
+/// Sliding `start` (and, for an absolute-`end` span, `end` too, preserving the block's length) changes
+/// the block's `schedule_rev`, so `apply` reconciles the stale triggers for the old time away and arms
+/// the new ones in one command. Per NG8 (no rollover) a snooze that would cross midnight is refused
+/// rather than silently wrapping into the next day.
+fn snooze(args: SnoozeArgs, out: &mut dyn Write, context: &ContextRefs<'_>) -> Result<()> {
+    let SnoozeArgs { id, by, date } = args;
+    let date = date.unwrap_or_else(|| today(context));
+    let by_minutes = by.as_seconds() / 60;
+    update_plan(context, &date, |existing| {
+        let mut plan = required_plan(existing, &date)?;
+        let block = find_block_mut(&mut plan, &id)?;
+        ensure_non_terminal(block)?;
+        block.start = snooze_clock(block.start, by_minutes)?;
+        if let Span::End(end) = block.span {
+            block.span = Span::End(snooze_clock(end, by_minutes)?);
+        }
+        Ok(plan)
+    })?;
+    writeln!(out, "snoozed {id} by {by} on {date}")?;
+    apply(
+        ApplyArgs {
+            date: Some(date),
+            dry_run: false,
+        },
+        out,
+        context,
+    )
+}
+
+/// Shifts a wall-clock time `by_minutes` later, refusing a slide that would leave the day (Inv: NG8).
+fn snooze_clock(time: ClockTime, by_minutes: u32) -> Result<ClockTime> {
+    let shifted = u32::from(time.minutes_since_midnight()) + by_minutes;
+    u16::try_from(shifted)
+        .ok()
+        .and_then(|minutes| ClockTime::from_minutes_since_midnight(minutes).ok())
+        .ok_or_else(|| {
+            Error::Usage(format!(
+                "snooze would move {time} past midnight; keep the block within the same day"
+            ))
+        })
 }
 
 fn clear(args: ClearArgs, out: &mut dyn Write, context: &ContextRefs<'_>) -> Result<()> {
