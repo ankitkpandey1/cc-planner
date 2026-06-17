@@ -6,6 +6,12 @@ This project follows Keep a Changelog and uses Semantic Versioning.
 
 ## [Unreleased]
 
+## [1.2.1](https://github.com/ankitkpandey1/ccplan/compare/v1.2.0...v1.2.1) - 2026-06-17
+
+### Other
+
+- *(cli)* stop integration tests firing real desktop notifications ([#9](https://github.com/ankitkpandey1/ccplan/pull/9))
+
 ## [1.2.0] - 2026-06-16
 
 ### Added
