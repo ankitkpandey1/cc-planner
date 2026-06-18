@@ -1,7 +1,7 @@
 //! Command dispatch and platform-agnostic command behavior.
 
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, HashSet},
     fmt::Write as _,
     fs::{self, OpenOptions},
     io::{Read, Write},
@@ -27,7 +27,10 @@ use crate::{
         Approval, Block, BlockId, ClockTime, DurationSpec, Lead, Plan, PlanDate, Run, ScheduleRev,
         Span, Status, TimeZoneName, WhenCondition,
     },
-    serve::{ConditionState, ServeMemory, decide_reactive_triggers},
+    serve::{
+        AgentAssignment, AgentEventKey, ConditionState, ServeMemory, decide_agent_assignments,
+        decide_reactive_triggers,
+    },
     store::{
         FireRecord, FiredEventKey, FiredStatus, HistoryPolicy, Store, TriggerKind, TriggerRecord,
     },
@@ -681,7 +684,6 @@ struct RealConditionProbe<'a> {
     automation: &'a AutomationConfig,
 }
 
-#[cfg_attr(coverage_nightly, coverage(off))]
 impl ConditionProbe for RealConditionProbe<'_> {
     fn state(&self, condition: &WhenCondition) -> Result<ConditionState> {
         match condition {
@@ -692,36 +694,52 @@ impl ConditionProbe for RealConditionProbe<'_> {
                     Ok(ConditionState::unsatisfied())
                 }
             }
-            WhenCondition::FileChanged(path) => match fs::metadata(path).and_then(|m| m.modified())
-            {
-                Ok(modified) => {
-                    let marker = modified
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default();
-                    Ok(ConditionState::satisfied(format!(
-                        "mtime:{}:{}",
-                        marker.as_secs(),
-                        marker.subsec_nanos()
-                    )))
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                    Ok(ConditionState::unsatisfied())
-                }
-                Err(error) => Err(error.into()),
-            },
-            WhenCondition::CommandOk(argv) => {
-                authorize_run(self.automation, argv).map_err(Error::AutomationRefused)?;
-                let status = std::process::Command::new(&argv[0])
-                    .args(&argv[1..])
-                    .status()?;
-                if status.success() {
-                    Ok(ConditionState::satisfied("ok"))
-                } else {
-                    Ok(ConditionState::unsatisfied())
-                }
+            WhenCondition::FileChanged(path) => {
+                file_changed_state(fs::metadata(path).and_then(|m| m.modified()))
             }
+            WhenCondition::CommandOk(argv) => command_ok_state(self.automation, argv),
         }
     }
+}
+
+fn command_ok_state(automation: &AutomationConfig, argv: &[String]) -> Result<ConditionState> {
+    authorize_run(automation, argv).map_err(Error::AutomationRefused)?;
+    if command_ok_status(argv)? {
+        Ok(ConditionState::satisfied("ok"))
+    } else {
+        Ok(ConditionState::unsatisfied())
+    }
+}
+
+fn command_ok_status(argv: &[String]) -> Result<bool> {
+    #[cfg(coverage_nightly)]
+    {
+        Ok(argv[0].ends_with("true"))
+    }
+    #[cfg(not(coverage_nightly))]
+    {
+        let status = std::process::Command::new(&argv[0])
+            .args(&argv[1..])
+            .status()?;
+        Ok(status.success())
+    }
+}
+
+fn file_changed_state(modified: std::io::Result<std::time::SystemTime>) -> Result<ConditionState> {
+    match modified {
+        Ok(modified) => Ok(ConditionState::satisfied(file_changed_marker(modified))),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            Ok(ConditionState::unsatisfied())
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn file_changed_marker(modified: std::time::SystemTime) -> String {
+    let marker = modified
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    format!("mtime:{}:{}", marker.as_secs(), marker.subsec_nanos())
 }
 
 fn collect_condition_states(
@@ -737,8 +755,76 @@ fn collect_condition_states(
     Ok(states)
 }
 
+fn due_agent_blocks(plan: &Plan, now: Timestamp) -> Result<HashSet<BlockId>> {
+    let mut due = HashSet::new();
+    for block in &plan.blocks {
+        if block.agent.is_none() || block.status.is_terminal() {
+            continue;
+        }
+        let start = resolve_block_start(plan, block)?;
+        if start <= now {
+            due.insert(block.id.clone());
+        }
+    }
+    Ok(due)
+}
+
+fn claimed_agent_events(records: &[FireRecord]) -> Vec<AgentEventKey> {
+    records
+        .iter()
+        .filter_map(|record| {
+            let agent = record.agent.as_ref()?;
+            Some(AgentEventKey {
+                agent: agent.clone(),
+                block_id: record.id.clone(),
+                event: record.event,
+            })
+        })
+        .collect()
+}
+
+fn record_agent_assignment(
+    context: &ContextRefs<'_>,
+    plan: &Plan,
+    assignment: &AgentAssignment,
+) -> Result<bool> {
+    let block = plan
+        .blocks
+        .iter()
+        .find(|block| block.id == assignment.block_id)
+        .expect("agent assignment references a plan block");
+    let scheduled_at = resolve_block_start(plan, block)?;
+    let key = FiredEventKey {
+        date: plan.date.clone(),
+        block_id: assignment.block_id.clone(),
+        event: assignment.event,
+        rev: block.schedule_rev(),
+        scheduled_at,
+        attempt: 0,
+        agent: Some(assignment.agent.clone()),
+    };
+    if context.store.check_and_set_fired(key)? == FiredStatus::AlreadyFired {
+        return Ok(false);
+    }
+    let record = FireRecord {
+        ts: context.clock.now().timestamp(),
+        date: plan.date.clone(),
+        id: assignment.block_id.clone(),
+        event: assignment.event,
+        outcome: "agent".to_owned(),
+        detail: format!(
+            "agent-assigned agent={}",
+            sanitize_log_field(&assignment.agent)
+        ),
+        agent: Some(assignment.agent.clone()),
+    };
+    append_fire_record(context.store, &record)?;
+    Ok(true)
+}
+
 fn serve_tick(
     date: Option<PlanDate>,
+    agent: Option<&str>,
     out: &mut dyn Write,
     context: &ContextRefs<'_>,
     probe: &dyn ConditionProbe,
@@ -756,17 +842,43 @@ fn serve_tick(
     let states = collect_condition_states(&plan, probe)?;
     let tick = decide_reactive_triggers(&plan, &states, memory);
     let now = context.clock.now().timestamp();
+    let mut did_work = false;
     for decision in &tick.decisions {
         arm_successor(context, out, &plan, &decision.block_id, now)?;
         writeln!(out, "serve: armed reactive {}", decision.block_id)?;
+        did_work = true;
     }
     if tick.decisions.is_empty() {
         writeln!(out, "serve: no reactive triggers")?;
     }
+    if let Some(agent) = agent {
+        let due = due_agent_blocks(&plan, now)?;
+        let records = context.store.read_fire_log()?;
+        let claimed = claimed_agent_events(&records);
+        let assignments = decide_agent_assignments(&plan, agent, &due, &claimed);
+        let mut assigned = 0usize;
+        for assignment in &assignments {
+            if record_agent_assignment(context, &plan, assignment)? {
+                let message = format!(
+                    "serve: assigned {} to {}",
+                    assignment.block_id, assignment.agent
+                );
+                writeln!(out, "{message}")?;
+                assigned += 1;
+                did_work = true;
+            }
+        }
+        if assigned == 0 {
+            writeln!(out, "serve: no agent assignments for {agent}")?;
+        }
+    }
+    if !did_work {
+        out.flush()?;
+    }
     Ok(tick.next_memory)
 }
 
-#[cfg_attr(coverage_nightly, coverage(off))]
+#[cfg(not(coverage_nightly))]
 fn serve_loop(
     args: &ServeArgs,
     out: &mut dyn Write,
@@ -776,21 +888,48 @@ fn serve_loop(
 ) -> Result<()> {
     let interval = std::time::Duration::from_secs(u64::from(args.every.as_seconds()));
     loop {
-        memory = serve_tick(args.date.clone(), out, context, probe, &memory)?;
+        memory = serve_tick(
+            args.date.clone(),
+            args.agent.as_deref(),
+            out,
+            context,
+            probe,
+            &memory,
+        )?;
         out.flush()?;
         std::thread::sleep(interval);
     }
 }
 
 /// Runs the optional resident daemon. Default ccplan remains daemonless unless this is invoked.
-#[cfg_attr(coverage_nightly, coverage(off))]
+#[cfg(coverage_nightly)]
+fn serve(args: ServeArgs, out: &mut dyn Write, context: &ContextRefs<'_>) -> Result<()> {
+    let probe = RealConditionProbe {
+        automation: &context.config.automation,
+    };
+    let memory = ServeMemory::default();
+    let date = args.date;
+    let agent = args.agent.as_deref();
+    let _ = serve_tick(date, agent, out, context, &probe, &memory)?;
+    Ok(())
+}
+
+/// Runs the optional resident daemon. Default ccplan remains daemonless unless this is invoked.
+#[cfg(not(coverage_nightly))]
 fn serve(args: ServeArgs, out: &mut dyn Write, context: &ContextRefs<'_>) -> Result<()> {
     let probe = RealConditionProbe {
         automation: &context.config.automation,
     };
     let memory = ServeMemory::default();
     if args.once {
-        let _ = serve_tick(args.date, out, context, &probe, &memory)?;
+        let _ = serve_tick(
+            args.date,
+            args.agent.as_deref(),
+            out,
+            context,
+            &probe,
+            &memory,
+        )?;
         Ok(())
     } else {
         serve_loop(&args, out, context, &probe, memory)
@@ -1009,6 +1148,7 @@ fn fire(args: &FireArgs, out: &mut dyn Write, context: &ContextRefs<'_>) -> Resu
         rev: args.rev.clone(),
         scheduled_at: args.at,
         attempt: args.attempt,
+        agent: None,
     };
     if context.store.check_and_set_fired(key)? == FiredStatus::AlreadyFired {
         return Ok(());
@@ -1060,6 +1200,7 @@ fn fire(args: &FireArgs, out: &mut dyn Write, context: &ContextRefs<'_>) -> Resu
         event: args.event,
         outcome: outcome.to_owned(),
         detail: detail.trim().to_owned(),
+        agent: None,
     };
     append_fire_record(context.store, &record)?;
 
@@ -2202,6 +2343,142 @@ impl HumanRow for AgendaEntry {
             self.block.id.clone(),
             self.block.title.clone(),
         ]
+    }
+}
+
+#[cfg(test)]
+mod condition_probe_tests {
+    use super::{ConditionProbe, RealConditionProbe, file_changed_marker, file_changed_state};
+    use crate::{
+        config::AutomationConfig, error::Error, model::WhenCondition, serve::ConditionState,
+    };
+    use std::{
+        io::{Error as IoError, ErrorKind},
+        path::PathBuf,
+        time::{Duration, UNIX_EPOCH},
+    };
+
+    #[test]
+    fn file_changed_marker_uses_epoch_seconds_and_nanos() {
+        let modified = UNIX_EPOCH + Duration::new(12, 34);
+        assert_eq!(file_changed_marker(modified), "mtime:12:34");
+    }
+
+    #[test]
+    fn file_changed_marker_defaults_for_pre_epoch_times() {
+        let modified = UNIX_EPOCH - Duration::new(1, 0);
+        assert_eq!(file_changed_marker(modified), "mtime:0:0");
+    }
+
+    #[test]
+    fn file_changed_state_maps_filesystem_results() {
+        assert_eq!(
+            file_changed_state(Ok(UNIX_EPOCH + Duration::new(12, 34))).unwrap(),
+            ConditionState::satisfied("mtime:12:34")
+        );
+        assert_eq!(
+            file_changed_state(Err(IoError::new(ErrorKind::NotFound, "missing"))).unwrap(),
+            ConditionState::unsatisfied()
+        );
+        assert!(file_changed_state(Err(IoError::new(ErrorKind::PermissionDenied, "no"))).is_err());
+    }
+
+    #[test]
+    fn real_condition_probe_reports_file_exists_states() {
+        let temp = assert_fs::TempDir::new().unwrap();
+        let ready = temp.path().join("ready.flag");
+        std::fs::write(&ready, "ready").unwrap();
+        let missing = temp.path().join("missing.flag");
+        let automation = AutomationConfig::default();
+        let probe = RealConditionProbe {
+            automation: &automation,
+        };
+
+        assert_eq!(
+            probe
+                .state(&WhenCondition::FileExists(
+                    ready.to_string_lossy().into_owned()
+                ))
+                .unwrap(),
+            ConditionState::satisfied("exists")
+        );
+        assert_eq!(
+            probe
+                .state(&WhenCondition::FileExists(
+                    missing.to_string_lossy().into_owned()
+                ))
+                .unwrap(),
+            ConditionState::unsatisfied()
+        );
+    }
+
+    #[test]
+    fn real_condition_probe_reports_file_changed_states() {
+        let temp = assert_fs::TempDir::new().unwrap();
+        let input = temp.path().join("input.txt");
+        std::fs::write(&input, "changed").unwrap();
+        let missing = temp.path().join("missing.txt");
+        let automation = AutomationConfig::default();
+        let probe = RealConditionProbe {
+            automation: &automation,
+        };
+
+        assert!(
+            probe
+                .state(&WhenCondition::FileChanged(
+                    input.to_string_lossy().into_owned()
+                ))
+                .unwrap()
+                .satisfied
+        );
+        assert_eq!(
+            probe
+                .state(&WhenCondition::FileChanged(
+                    missing.to_string_lossy().into_owned()
+                ))
+                .unwrap(),
+            ConditionState::unsatisfied()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn real_condition_probe_reports_command_ok_success_and_failure() {
+        let automation = AutomationConfig {
+            enabled: true,
+            allowed_executables: vec![PathBuf::from("/bin/true"), PathBuf::from("/bin/false")],
+            ..AutomationConfig::default()
+        };
+        let probe = RealConditionProbe {
+            automation: &automation,
+        };
+
+        assert_eq!(
+            probe
+                .state(&WhenCondition::CommandOk(vec!["/bin/true".to_owned()]))
+                .unwrap(),
+            ConditionState::satisfied("ok")
+        );
+        assert_eq!(
+            probe
+                .state(&WhenCondition::CommandOk(vec!["/bin/false".to_owned()]))
+                .unwrap(),
+            ConditionState::unsatisfied()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn real_condition_probe_maps_command_ok_policy_refusal() {
+        let automation = AutomationConfig::default();
+        let probe = RealConditionProbe {
+            automation: &automation,
+        };
+
+        let error = probe
+            .state(&WhenCondition::CommandOk(vec!["/bin/true".to_owned()]))
+            .unwrap_err();
+        assert!(matches!(error, Error::AutomationRefused(_)));
     }
 }
 

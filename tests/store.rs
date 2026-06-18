@@ -538,6 +538,7 @@ fn fired_key(id: &str) -> FiredEventKey {
         rev: block.schedule_rev(),
         scheduled_at: timestamp(),
         attempt: 0,
+        agent: None,
     }
 }
 
@@ -836,6 +837,7 @@ fn dead_man_check_skips_other_block_records_and_non_success_outcomes() {
             event: ccplan::lifecycle::Event::Start,
             outcome: "notify".to_owned(),
             detail: String::new(),
+            agent: None,
         },
         // This record's id matches but outcome is not "notify"/"run-ok" → line 247 } hit.
         FireRecord {
@@ -845,6 +847,7 @@ fn dead_man_check_skips_other_block_records_and_non_success_outcomes() {
             event: ccplan::lifecycle::Event::Start,
             outcome: "activate".to_owned(),
             detail: String::new(),
+            agent: None,
         },
     ];
     let content: String = records
@@ -902,6 +905,7 @@ fn dead_man_check_returns_false_when_recent_success() {
         event: ccplan::lifecycle::Event::Start,
         outcome: "notify".to_owned(),
         detail: String::new(),
+        agent: None,
     };
     let line = serde_json::to_string(&record).unwrap() + "\n";
     std::fs::write(store.fire_log_path(), line).unwrap();
@@ -927,6 +931,7 @@ fn dead_man_check_returns_true_when_success_is_too_old() {
         event: ccplan::lifecycle::Event::Start,
         outcome: "notify".to_owned(),
         detail: String::new(),
+        agent: None,
     };
     let line = serde_json::to_string(&record).unwrap() + "\n";
     std::fs::write(store.fire_log_path(), line).unwrap();

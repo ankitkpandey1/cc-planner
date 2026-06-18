@@ -1,8 +1,11 @@
 //! Pure decision core for the opt-in `ccplan serve` daemon.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
-use crate::model::{BlockId, Plan, Status, WhenCondition};
+use crate::{
+    lifecycle::Event,
+    model::{BlockId, Plan, Status, WhenCondition},
+};
 
 /// Last condition marker observed by the resident serve loop.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -64,6 +67,22 @@ pub struct ReactivePlan {
     pub next_memory: ServeMemory,
 }
 
+/// One agent/block/event claim recorded in the append-only fire ledger.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentEventKey {
+    pub agent: String,
+    pub block_id: BlockId,
+    pub event: Event,
+}
+
+/// A due block that this serve tick should assign to an agent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentAssignment {
+    pub agent: String,
+    pub block_id: BlockId,
+    pub event: Event,
+}
+
 /// Decides which reactive blocks should be armed on this serve tick.
 ///
 /// A satisfied condition fires only when its marker is new for that block. Unsatisfied or missing
@@ -105,16 +124,55 @@ pub fn decide_reactive_triggers(
     }
 }
 
+/// Assigns due, agent-owned blocks that have not already been claimed.
+#[must_use]
+pub fn decide_agent_assignments(
+    plan: &Plan,
+    agent: &str,
+    due_blocks: &HashSet<BlockId>,
+    claimed: &[AgentEventKey],
+) -> Vec<AgentAssignment> {
+    let mut assignments = Vec::new();
+    for block in &plan.blocks {
+        if block.agent.as_deref() != Some(agent) {
+            continue;
+        }
+        if block.status.is_terminal() || !due_blocks.contains(&block.id) {
+            continue;
+        }
+        let key = AgentEventKey {
+            agent: agent.to_owned(),
+            block_id: block.id.clone(),
+            event: Event::Start,
+        };
+        if claimed.contains(&key) {
+            continue;
+        }
+        assignments.push(AgentAssignment {
+            agent: agent.to_owned(),
+            block_id: block.id.clone(),
+            event: Event::Start,
+        });
+    }
+    assignments
+}
+
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
 
-    use crate::model::{
-        Block, BlockId, ClockTime, DurationSpec, Lead, Plan, PlanDate, Run, Span, Status,
-        TimeZoneName, WhenCondition,
+    use crate::{
+        lifecycle::Event,
+        model::{
+            Block, BlockId, ClockTime, DurationSpec, Lead, Plan, PlanDate, Run, Span, Status,
+            TimeZoneName, WhenCondition,
+        },
     };
 
-    use super::{ConditionState, ReactiveDecision, ServeMemory, decide_reactive_triggers};
+    use super::{
+        AgentEventKey, ConditionState, ReactiveDecision, ServeMemory, decide_agent_assignments,
+        decide_reactive_triggers,
+    };
 
     fn block(id: &str, status: Status, when: Option<WhenCondition>) -> Block {
         Block {
@@ -140,6 +198,12 @@ mod tests {
         }
     }
 
+    fn agent_block(id: &str, agent: Option<&str>, status: Status) -> Block {
+        let mut block = block(id, status, None);
+        block.agent = agent.map(str::to_owned);
+        block
+    }
+
     fn plan(blocks: Vec<Block>) -> Plan {
         Plan {
             date: "2026-06-08".parse::<PlanDate>().unwrap(),
@@ -153,6 +217,10 @@ mod tests {
             .iter()
             .map(|(id, state)| (BlockId::new(*id).unwrap(), state.clone()))
             .collect()
+    }
+
+    fn due(ids: &[&str]) -> HashSet<BlockId> {
+        ids.iter().map(|id| BlockId::new(*id).unwrap()).collect()
     }
 
     #[test]
@@ -303,5 +371,40 @@ mod tests {
                 .marker_for(&BlockId::new("active").unwrap())
                 .is_none()
         );
+    }
+
+    #[test]
+    fn agent_assignments_include_only_due_matching_unclaimed_blocks() {
+        let plan = plan(vec![
+            agent_block("mine", Some("alpha"), Status::Pending),
+            agent_block("later", Some("alpha"), Status::Pending),
+            agent_block("other", Some("beta"), Status::Pending),
+            agent_block("done", Some("alpha"), Status::Done),
+            agent_block("plain", None, Status::Pending),
+        ]);
+        let assignments =
+            decide_agent_assignments(&plan, "alpha", &due(&["mine", "other", "done"]), &[]);
+
+        assert_eq!(
+            assignments,
+            vec![super::AgentAssignment {
+                agent: "alpha".to_owned(),
+                block_id: BlockId::new("mine").unwrap(),
+                event: Event::Start,
+            }]
+        );
+    }
+
+    #[test]
+    fn agent_assignments_skip_claimed_blocks() {
+        let plan = plan(vec![agent_block("mine", Some("alpha"), Status::Pending)]);
+        let claimed = vec![AgentEventKey {
+            agent: "alpha".to_owned(),
+            block_id: BlockId::new("mine").unwrap(),
+            event: Event::Start,
+        }];
+        let assignments = decide_agent_assignments(&plan, "alpha", &due(&["mine"]), &claimed);
+
+        assert!(assignments.is_empty());
     }
 }

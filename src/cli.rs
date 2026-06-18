@@ -176,6 +176,9 @@ pub struct WatchArgs {
 pub struct ServeArgs {
     #[arg(long)]
     pub date: Option<PlanDate>,
+    /// Agent name this serve process claims work for.
+    #[arg(long)]
+    pub agent: Option<String>,
     /// Poll interval, e.g. `30s`, `1m`, `5m` (default `30s`, max 24h).
     #[arg(long = "every", default_value = "30s")]
     pub every: DurationSpec,

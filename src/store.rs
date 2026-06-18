@@ -683,6 +683,8 @@ pub struct FiredEventKey {
     pub scheduled_at: Timestamp,
     #[serde(default)]
     pub attempt: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -731,6 +733,8 @@ pub struct FireRecord {
     pub event: Event,
     pub outcome: String,
     pub detail: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]

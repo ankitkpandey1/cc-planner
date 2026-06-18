@@ -54,5 +54,6 @@ fn fired_key(id: &str) -> FiredEventKey {
         rev: block.schedule_rev(),
         scheduled_at: "2026-06-08T13:00:00Z".parse::<Timestamp>().unwrap(),
         attempt: 0,
+        agent: None,
     }
 }

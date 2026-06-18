@@ -115,6 +115,7 @@ fn watch_command() -> Command {
 fn serve_command() -> Command {
     Command::new("serve")
         .arg(date_arg())
+        .arg(Arg::new("agent").long("agent").value_name("NAME"))
         .arg(Arg::new("every").long("every").default_value("30s"))
         .arg(flag("once", "once"))
 }

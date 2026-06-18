@@ -7,13 +7,13 @@ use ccplan::{
         Scheduler, SchedulerCall, SchedulerError,
     },
     error::Error,
-    lifecycle::{EndBehavior, LifecyclePolicy},
+    lifecycle::{EndBehavior, Event, LifecyclePolicy},
     model::{
         Approval, Block, BlockId, ClockTime, DurationSpec, Lead, Plan, PlanDate, Retry, Run, Span,
         Status, TimeZoneName, WhenCondition,
     },
     run_with_context,
-    store::{HistoryPolicy, Store, StoreError, TriggerKind, TriggerRecord},
+    store::{FiredEventKey, HistoryPolicy, Store, StoreError, TriggerKind, TriggerRecord},
     time::FixedClock,
 };
 use clap::Parser;
@@ -110,6 +110,139 @@ fn serve_once_arms_satisfied_file_exists_condition() {
         }),
         "reactive start trigger should be scheduled: {triggers:?}"
     );
+}
+
+#[test]
+fn serve_once_arms_satisfied_file_changed_condition() {
+    let (temp, context) = test_context_at("2026-06-08T10:00:45+05:30[Asia/Kolkata]");
+    let input = temp.path().join("input.txt");
+    std::fs::write(&input, "changed").unwrap();
+    let mut reactive_plan = plan();
+    reactive_plan.blocks[0].when = Some(WhenCondition::FileChanged(
+        input.to_string_lossy().into_owned(),
+    ));
+    context
+        .store
+        .set_plan(&reactive_plan, HistoryPolicy::Preserve)
+        .unwrap();
+
+    let output = String::from_utf8(run_ok(&context, ["ccplan", "serve", "--once"])).unwrap();
+
+    assert!(output.contains("serve: armed reactive focus"), "{output}");
+}
+
+#[cfg(unix)]
+#[test]
+fn serve_once_arms_satisfied_command_ok_condition() {
+    let (_temp, mut context) = test_context_at("2026-06-08T10:00:45+05:30[Asia/Kolkata]");
+    context.config.automation.enabled = true;
+    context.config.automation.allowed_executables = vec![std::path::PathBuf::from("/bin/true")];
+    let mut reactive_plan = plan();
+    reactive_plan.blocks[0].when = Some(WhenCondition::CommandOk(vec!["/bin/true".to_owned()]));
+    context
+        .store
+        .set_plan(&reactive_plan, HistoryPolicy::Preserve)
+        .unwrap();
+
+    let output = String::from_utf8(run_ok(&context, ["ccplan", "serve", "--once"])).unwrap();
+
+    assert!(output.contains("serve: armed reactive focus"), "{output}");
+}
+
+#[cfg(unix)]
+#[test]
+fn serve_once_reports_idle_for_unsatisfied_command_ok_condition() {
+    let (_temp, mut context) = test_context_at("2026-06-08T10:00:45+05:30[Asia/Kolkata]");
+    context.config.automation.enabled = true;
+    context.config.automation.allowed_executables = vec![std::path::PathBuf::from("/bin/false")];
+    let mut reactive_plan = plan();
+    reactive_plan.blocks[0].when = Some(WhenCondition::CommandOk(vec!["/bin/false".to_owned()]));
+    context
+        .store
+        .set_plan(&reactive_plan, HistoryPolicy::Preserve)
+        .unwrap();
+
+    let output = String::from_utf8(run_ok(&context, ["ccplan", "serve", "--once"])).unwrap();
+
+    assert!(output.contains("serve: no reactive triggers"), "{output}");
+}
+
+#[test]
+fn serve_once_assigns_due_agent_block_once() {
+    let (_temp, context) = test_context_at("2026-06-08T10:00:10+05:30[Asia/Kolkata]");
+    let mut agent_plan = plan();
+    agent_plan.blocks[0].agent = Some("alpha".to_owned());
+    agent_plan.blocks[0].start = "10:00".parse::<ClockTime>().unwrap();
+    context
+        .store
+        .set_plan(&agent_plan, HistoryPolicy::Preserve)
+        .unwrap();
+
+    let output = String::from_utf8(run_ok(
+        &context,
+        ["ccplan", "serve", "--once", "--agent", "alpha"],
+    ))
+    .unwrap();
+
+    assert!(
+        output.contains("serve: assigned focus to alpha"),
+        "{output}"
+    );
+    let logged = std::fs::read_to_string(context.store.fire_log_path()).unwrap();
+    assert!(logged.contains("\"agent\":\"alpha\""), "{logged}");
+    assert!(logged.contains("agent-assigned agent=alpha"), "{logged}");
+
+    let repeated = String::from_utf8(run_ok(
+        &context,
+        ["ccplan", "serve", "--once", "--agent", "alpha"],
+    ))
+    .unwrap();
+    assert!(
+        repeated.contains("serve: no agent assignments for alpha"),
+        "{repeated}"
+    );
+    let logged = std::fs::read_to_string(context.store.fire_log_path()).unwrap();
+    assert_eq!(logged.matches("\"agent\":\"alpha\"").count(), 1, "{logged}");
+}
+
+#[test]
+fn serve_once_skips_agent_assignment_when_fired_key_is_already_claimed() {
+    let (_temp, context) = test_context_at("2026-06-08T10:00:10+05:30[Asia/Kolkata]");
+    let mut agent_plan = plan();
+    agent_plan.blocks[0].agent = Some("alpha".to_owned());
+    agent_plan.blocks[0].start = "10:00".parse::<ClockTime>().unwrap();
+    context
+        .store
+        .set_plan(&agent_plan, HistoryPolicy::Preserve)
+        .unwrap();
+    let block = &agent_plan.blocks[0];
+    context
+        .store
+        .check_and_set_fired(FiredEventKey {
+            date: agent_plan.date.clone(),
+            block_id: block.id.clone(),
+            event: Event::Start,
+            rev: block.schedule_rev(),
+            scheduled_at: "2026-06-08T10:00:00+05:30[Asia/Kolkata]"
+                .parse::<Zoned>()
+                .unwrap()
+                .timestamp(),
+            attempt: 0,
+            agent: Some("alpha".to_owned()),
+        })
+        .unwrap();
+
+    let output = String::from_utf8(run_ok(
+        &context,
+        ["ccplan", "serve", "--once", "--agent", "alpha"],
+    ))
+    .unwrap();
+
+    assert!(
+        output.contains("serve: no agent assignments for alpha"),
+        "{output}"
+    );
+    assert!(context.store.read_fire_log().unwrap().is_empty());
 }
 
 #[test]
