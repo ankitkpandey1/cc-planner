@@ -21,9 +21,8 @@ use jiff::{SignedDuration, Timestamp, Zoned};
 use serde_json::Value;
 
 #[test]
-#[cfg(feature = "gui")]
 fn gui_subcommand_headless_succeeds() {
-    // CCPLAN_HEADLESS makes run_gui() return Ok(()) without opening a window.
+    // CCPLAN_HEADLESS makes launch_cockpit() return Ok(()) without spawning the app.
     // This covers the Gui dispatch arm in the integration-test binary so the
     // llvm-cov --fail-under-lines 100 gate passes across all compiled binaries.
     // SAFETY: single-threaded test process; no other thread reads this var.

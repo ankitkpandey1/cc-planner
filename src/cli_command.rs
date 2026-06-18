@@ -41,16 +41,7 @@ pub(crate) fn command() -> Command {
 }
 
 fn gui_command() -> Command {
-    #[cfg(feature = "gui")]
-    {
-        Command::new("gui").about("Open the Cockpit GUI")
-    }
-    #[cfg(not(feature = "gui"))]
-    {
-        Command::new("gui")
-            .about("Open the Cockpit GUI (build with --features gui to enable)")
-            .hide(true)
-    }
+    Command::new("gui").about("Open the Cockpit desktop app")
 }
 
 fn set_command() -> Command {

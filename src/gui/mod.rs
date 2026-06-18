@@ -1,42 +1,52 @@
-//! Optional Cockpit GUI feature (`--features gui`). No logic here — pure IO boundary.
+//! Cockpit view-model layer (`model`), plus the `ccplan gui` launcher that opens the
+//! Tauri desktop app. The pure `model` builders are consumed by the Cockpit app
+//! (the `cockpit` crate) and unit-tested here.
 
 pub mod model;
-mod view;
 
-use crate::{context::ContextRefs, error::Result};
+use crate::error::Result;
 
-/// Launches the Cockpit GUI window.
+/// Opens the Cockpit desktop app — the `cockpit` binary built alongside `ccplan`.
 ///
-/// Marked coverage-off: this is the `eframe::run_native` IO boundary. All testable
-/// decision logic lives in `model`.
+/// Marked coverage-off: spawning the GUI process is a pure IO boundary. The dispatch
+/// arm is exercised by a `cfg(test)` early return, exactly as the old egui launcher was.
 #[cfg_attr(coverage_nightly, coverage(off))]
 #[allow(clippy::unnecessary_wraps, clippy::needless_return)]
-pub(crate) fn run_gui(context: &ContextRefs<'_>) -> Result<()> {
-    // Unit tests: return immediately.
+pub(crate) fn launch_cockpit() -> Result<()> {
     #[cfg(test)]
     {
-        let _ = context;
         return Ok(());
     }
-    // Integration tests and headless CI: honour CCPLAN_HEADLESS env-var.
     #[cfg(not(test))]
     {
+        use crate::error::Error;
+
+        // Integration tests and headless CI set CCPLAN_HEADLESS to exercise this arm
+        // without spawning a window.
         if std::env::var_os("CCPLAN_HEADLESS").is_some() {
             return Ok(());
         }
-        let store = context.store.clone();
-        let config = context.config.clone();
-        eframe::run_native(
-            "ccplan",
-            eframe::NativeOptions {
-                viewport: eframe::egui::ViewportBuilder::default()
-                    .with_title("ccplan")
-                    .with_inner_size([1280.0, 800.0])
-                    .with_min_inner_size([960.0, 600.0]),
-                ..Default::default()
-            },
-            Box::new(move |_cc| Ok(Box::new(view::CcplanApp::new_with_store(store, config)))),
-        )
-        .map_err(|e| crate::error::Error::Usage(e.to_string()))
+
+        let exe = std::env::current_exe().map_err(|e| Error::Usage(e.to_string()))?;
+        let dir = exe.parent().ok_or_else(|| {
+            Error::Usage("cannot locate the ccplan executable directory".to_owned())
+        })?;
+        let bin = if cfg!(windows) {
+            "cockpit.exe"
+        } else {
+            "cockpit"
+        };
+        let path = dir.join(bin);
+        if !path.exists() {
+            return Err(Error::Usage(format!(
+                "Cockpit app not found at {}. Build it with `cargo build --release` in \
+                 cockpit/src-tauri, or launch the bundled ccplan desktop app directly.",
+                path.display()
+            )));
+        }
+        std::process::Command::new(&path)
+            .status()
+            .map_err(|e| Error::Usage(e.to_string()))?;
+        return Ok(());
     }
 }

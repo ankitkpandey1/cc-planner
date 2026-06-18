@@ -8,12 +8,14 @@ This project follows Keep a Changelog and uses Semantic Versioning.
 
 ### Added
 
-- **Cockpit GUI** (`--features gui`): optional compile-time feature that opens a native desktop
-  window with Today, Upcoming, Automations, Agents, Activity, and Approvals tabs. Pure view-model
-  architecture — all tab data is built by pure Rust functions (`build_today_model`,
-  `build_approvals_model`, `build_activity_model`, `build_nav_model`) with 100% test coverage; the
-  eframe render layer is the only IO boundary. Enable with `cargo build --release --features gui`
-  and launch with `ccplan gui`. Headless escape hatch for CI: `CCPLAN_HEADLESS=1 ccplan gui`.
+- **Cockpit desktop app** (`cockpit/`): a native [Tauri](https://tauri.app) app over the ccplan
+  engine — a real GUI with a clickable day timeline, a New-block form, and one-click done/skip/
+  snooze/approve, plus Upcoming, Automations, Agents, Activity, and Approvals views. Backend is
+  thin: reads go through the pure `ccplan::gui::model` view-model builders (100% test coverage);
+  every mutation is funnelled through `ccplan::run` (the same entrypoint as the CLI) so all domain
+  invariants are reused, not re-implemented. Cross-platform (system WebView; .app/.dmg, .msi,
+  AppImage). `ccplan gui` launches it. See `cockpit/README.md`. (Replaces the earlier egui
+  prototype, which is removed.)
 
 ## [1.2.0] - 2026-06-16
 

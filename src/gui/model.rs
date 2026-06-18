@@ -58,7 +58,7 @@ fn format_recur_rule(rule: &RecurRule) -> String {
 }
 
 /// A single block rendered in the Today/Upcoming timeline.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 #[allow(clippy::struct_excessive_bools)]
 pub struct BlockCardModel {
     pub id: String,
@@ -120,7 +120,7 @@ pub fn build_block_card_model(block: &Block, plan: &Plan, now: Timestamp) -> Blo
 }
 
 /// Data for the Today timeline panel.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct TodayModel {
     pub date_label: String,
     pub now_label: String,
@@ -164,7 +164,7 @@ pub fn build_today_model(plan: &Plan, now: Timestamp) -> TodayModel {
 }
 
 /// A single pending-approval item in the Approvals panel.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct ApprovalItemModel {
     pub id: String,
     pub title: String,
@@ -175,7 +175,7 @@ pub struct ApprovalItemModel {
 }
 
 /// Data for the Approvals panel (blocks with `run:` awaiting approval).
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize)]
 pub struct ApprovalsModel {
     pub items: Vec<ApprovalItemModel>,
 }
@@ -202,7 +202,7 @@ pub fn build_approvals_model(plan: &Plan) -> ApprovalsModel {
 }
 
 /// Visual category for an activity feed item.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub enum ActivityKind {
     Ok,
     Run,
@@ -211,7 +211,7 @@ pub enum ActivityKind {
 }
 
 /// A single entry in the Activity (fire-ledger) feed.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct ActivityItemModel {
     pub icon: &'static str,
     pub ts_label: String,
@@ -220,7 +220,7 @@ pub struct ActivityItemModel {
 }
 
 /// Data for the Activity feed panel.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct ActivityModel {
     pub items: Vec<ActivityItemModel>,
 }
@@ -260,7 +260,7 @@ pub fn build_activity_model(records: &[FireRecord]) -> ActivityModel {
 }
 
 /// Navigation tabs in the left rail.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub enum NavTab {
     Today,
     Upcoming,
@@ -271,7 +271,7 @@ pub enum NavTab {
 }
 
 /// Data for the left-rail nav.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct NavModel {
     pub active_tab: NavTab,
     pub pending_approvals_count: usize,
@@ -289,14 +289,14 @@ pub fn build_nav_model(active_tab: NavTab, pending_approvals_count: usize) -> Na
 // ── Upcoming ─────────────────────────────────────────────────────────────────
 
 /// A single future day shown in the Upcoming panel.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct UpcomingDay {
     pub date_label: String,
     pub cards: Vec<BlockCardModel>,
 }
 
 /// Data for the Upcoming panel (next N days' plans).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct UpcomingModel {
     pub days: Vec<UpcomingDay>,
 }
@@ -322,7 +322,7 @@ pub fn build_upcoming_model(plans: &[Plan], now: Timestamp) -> UpcomingModel {
 // ── Automations ───────────────────────────────────────────────────────────────
 
 /// A single recurring rule shown in the Automations panel.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct AutomationRuleModel {
     pub id: String,
     pub title: String,
@@ -333,7 +333,7 @@ pub struct AutomationRuleModel {
 }
 
 /// Data for the Automations panel.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct AutomationsModel {
     pub rules: Vec<AutomationRuleModel>,
 }
@@ -371,7 +371,7 @@ pub fn build_automations_model(rules: &RecurringRules) -> AutomationsModel {
 // ── Agents ────────────────────────────────────────────────────────────────────
 
 /// A single agent's summary in the Agents panel.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct AgentStatusModel {
     pub name: String,
     pub last_action: String,
@@ -379,7 +379,7 @@ pub struct AgentStatusModel {
 }
 
 /// Data for the Agents panel.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct AgentsModel {
     pub agents: Vec<AgentStatusModel>,
 }
@@ -415,7 +415,7 @@ pub fn build_agents_model(records: &[FireRecord]) -> AgentsModel {
 // ── Block detail (right context pane) ────────────────────────────────────────
 
 /// Detailed information about a selected block for the right context pane.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct BlockDetailModel {
     pub id: String,
     pub title: String,
@@ -469,7 +469,7 @@ pub fn build_block_detail_model(block: &Block, plan: &Plan, now: Timestamp) -> B
 // ── Up-next (default right pane when nothing selected) ───────────────────────
 
 /// Next 3 upcoming blocks shown in the right pane when nothing is selected.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct UpNextModel {
     pub items: Vec<BlockCardModel>,
 }

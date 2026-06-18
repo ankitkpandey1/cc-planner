@@ -74,8 +74,7 @@ pub fn dispatch(
             Ok(())
         }
         Some(Commands::Mcp(_args)) => crate::mcp::run_mcp_server(context),
-        #[cfg(feature = "gui")]
-        Some(Commands::Gui) => crate::gui::run_gui(context),
+        Some(Commands::Gui) => crate::gui::launch_cockpit(),
     }
 }
 
@@ -2955,7 +2954,6 @@ status = "pending"
 }
 
 #[cfg(test)]
-#[cfg(feature = "gui")]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod gui_dispatch_tests {
     use super::dispatch;
@@ -2986,8 +2984,8 @@ mod gui_dispatch_tests {
     }
 
     #[test]
-    fn gui_dispatch_uses_run_gui() {
-        // run_gui has a cfg(test) early-return so this just covers the dispatch arm.
+    fn gui_dispatch_launches_cockpit() {
+        // launch_cockpit has a cfg(test) early-return so this just covers the dispatch arm.
         let (_temp, ctx) = make_ctx("2026-06-08T10:00:00+05:30[Asia/Kolkata]");
         dispatch(
             Some(crate::cli::Commands::Gui),

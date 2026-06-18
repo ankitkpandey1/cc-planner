@@ -50,7 +50,7 @@ pub enum Commands {
     Doctor,
     Completions(CompletionsArgs),
     Mcp(McpArgs),
-    #[cfg(feature = "gui")]
+    /// Open the Cockpit desktop app.
     Gui,
 }
 

@@ -14,7 +14,6 @@ mod commands;
 pub mod config;
 pub mod context;
 pub mod error;
-#[cfg(feature = "gui")]
 pub mod gui;
 pub mod lifecycle;
 pub mod mcp;
