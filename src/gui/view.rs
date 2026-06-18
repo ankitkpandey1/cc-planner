@@ -42,6 +42,8 @@ enum GuiAction {
     Done(String),
     Skip(String),
     Dismiss(String),
+    /// Restore a previously saved plan snapshot (undo the last Done/Skip).
+    RestorePlan(Box<crate::model::Plan>),
 }
 
 // ── Toast ──────────────────────────────────────────────────────────────────────
@@ -50,6 +52,7 @@ struct Toast {
     message: String,
     is_error: bool,
     created: std::time::Instant,
+    undo_action: Option<GuiAction>,
 }
 
 impl Toast {
@@ -58,6 +61,15 @@ impl Toast {
             message: msg.into(),
             is_error: false,
             created: std::time::Instant::now(),
+            undo_action: None,
+        }
+    }
+    fn undoable(msg: impl Into<String>, undo: GuiAction) -> Self {
+        Self {
+            message: msg.into(),
+            is_error: false,
+            created: std::time::Instant::now(),
+            undo_action: Some(undo),
         }
     }
     fn error(msg: impl Into<String>) -> Self {
@@ -65,6 +77,7 @@ impl Toast {
             message: msg.into(),
             is_error: true,
             created: std::time::Instant::now(),
+            undo_action: None,
         }
     }
 }
@@ -83,6 +96,7 @@ pub(crate) struct CcplanApp {
     hovered_block_id: Option<String>,
     command_input: String,
     dark_mode: bool,
+    nav_collapsed: bool,
     toasts: Vec<Toast>,
     last_refresh: std::time::Instant,
     cmd_bar_id: egui::Id,
@@ -105,6 +119,7 @@ impl CcplanApp {
             hovered_block_id: None,
             command_input: String::new(),
             dark_mode: true,
+            nav_collapsed: false,
             toasts: Vec::new(),
             last_refresh: std::time::Instant::now()
                 .checked_sub(std::time::Duration::from_secs(10))
@@ -159,13 +174,32 @@ impl CcplanApp {
         self.last_refresh = std::time::Instant::now();
     }
 
-    fn execute_action(&mut self, action: &GuiAction) {
+    fn execute_action(&mut self, action: GuiAction) {
         use crate::{
             cli::{ApproveArgs, BlockTarget, Commands},
             commands::dispatch,
             context::{Context, UnavailableNotifier, UnavailableScheduler},
             time::SystemClock,
         };
+
+        // Undo: restore previous plan snapshot directly to store.
+        if let GuiAction::RestorePlan(prev) = action {
+            use crate::store::HistoryPolicy;
+            if let Err(e) = self.store.set_plan(&prev, HistoryPolicy::Override) {
+                self.toasts.push(Toast::error(format!("Undo failed: {e}")));
+            } else {
+                self.toasts.push(Toast::success("Undone"));
+                self.refresh_data();
+            }
+            return;
+        }
+
+        if let GuiAction::Dismiss(_) = action {
+            return;
+        }
+
+        // Save plan snapshot before mutating (for undo).
+        let snapshot = self.plan.clone();
 
         let ctx = Context::new(
             self.store.clone(),
@@ -177,7 +211,7 @@ impl CcplanApp {
         let refs = ctx.as_refs();
         let mut out = Vec::<u8>::new();
 
-        let result = match action {
+        let result = match &action {
             GuiAction::Approve(id_str) => id_str.parse().map(|id| {
                 dispatch(
                     Some(Commands::Approve(ApproveArgs { id, date: None })),
@@ -191,21 +225,27 @@ impl CcplanApp {
             GuiAction::Skip(id_str) => id_str
                 .parse()
                 .map(|id| dispatch(Some(Commands::Skip(BlockTarget { id })), &mut out, &refs)),
-            GuiAction::Dismiss(_) => {
-                // Dismiss just refreshes without any engine mutation.
-                return;
-            }
+            GuiAction::Dismiss(_) | GuiAction::RestorePlan(_) => unreachable!(),
         };
 
         match result {
             Ok(Ok(())) => {
-                let msg = match action {
-                    GuiAction::Approve(_) => "Approved",
-                    GuiAction::Done(_) => "Marked done",
-                    GuiAction::Skip(_) => "Skipped",
-                    GuiAction::Dismiss(_) => unreachable!(),
+                let (msg, undoable) = match &action {
+                    GuiAction::Approve(_) => ("Approved", false),
+                    GuiAction::Done(_) => ("Marked done · Undo", true),
+                    GuiAction::Skip(_) => ("Skipped · Undo", true),
+                    GuiAction::Dismiss(_) | GuiAction::RestorePlan(_) => unreachable!(),
                 };
-                self.toasts.push(Toast::success(msg));
+                if undoable {
+                    if let Some(snap) = snapshot {
+                        self.toasts
+                            .push(Toast::undoable(msg, GuiAction::RestorePlan(Box::new(snap))));
+                    } else {
+                        self.toasts.push(Toast::success(msg));
+                    }
+                } else {
+                    self.toasts.push(Toast::success(msg));
+                }
             }
             Ok(Err(e)) => {
                 self.toasts.push(Toast::error(e.to_string()));
@@ -216,6 +256,51 @@ impl CcplanApp {
         }
 
         self.refresh_data();
+    }
+
+    fn execute_command_text(&mut self, text: &str) {
+        use crate::{cli::Cli, commands::dispatch};
+        use clap::Parser as _;
+
+        if let Some(slash) = text.strip_prefix('/') {
+            // Parse as CLI: `/add Focus --at 9:00 --for 1h` → ["ccplan", "add", "Focus", ...]
+            let parts: Vec<&str> = slash.split_ascii_whitespace().collect();
+            let argv: Vec<&str> = std::iter::once("ccplan").chain(parts).collect();
+            match Cli::try_parse_from(&argv) {
+                Ok(cli) => {
+                    use crate::{
+                        context::{Context, UnavailableNotifier, UnavailableScheduler},
+                        time::SystemClock,
+                    };
+                    let ctx = Context::new(
+                        self.store.clone(),
+                        SystemClock,
+                        UnavailableScheduler,
+                        UnavailableNotifier,
+                        self.config.clone(),
+                    );
+                    let refs = ctx.as_refs();
+                    let mut out = Vec::<u8>::new();
+                    match dispatch(cli.command, &mut out, &refs) {
+                        Ok(()) => {
+                            self.toasts.push(Toast::success("Done"));
+                            self.refresh_data();
+                        }
+                        Err(e) => self.toasts.push(Toast::error(e.to_string())),
+                    }
+                }
+                Err(e) => {
+                    self.toasts.push(Toast::error(format!(
+                        "Unknown command. Try /add \"Title\" --at HH:MM --for 1h  ({e})"
+                    )));
+                }
+            }
+        } else {
+            // Plain text with no agent configured.
+            self.toasts.push(Toast::error(
+                "No agent connected. Use /add \"Title\" --at HH:MM --for 1h".to_owned(),
+            ));
+        }
     }
 
     #[allow(clippy::collapsible_if)]
@@ -240,8 +325,7 @@ impl CcplanApp {
         // j / k: move block selection in Today tab.
         if self.active_tab == NavTab::Today {
             if let Some(ref plan) = self.plan {
-                let ids: Vec<String> =
-                    plan.blocks.iter().map(|b| b.id.to_string()).collect();
+                let ids: Vec<String> = plan.blocks.iter().map(|b| b.id.to_string()).collect();
                 let current_idx = self
                     .selected_block_id
                     .as_ref()
@@ -297,11 +381,18 @@ impl eframe::App for CcplanApp {
         // Pending actions collected during rendering.
         let mut pending_actions: Vec<GuiAction> = Vec::new();
 
-        // Left nav (240px).
+        // Left nav (240px expanded / 64px collapsed).
+        let nav_width = if self.nav_collapsed { 64.0 } else { 240.0 };
         egui::Panel::left("nav")
-            .exact_size(240.0)
+            .exact_size(nav_width)
             .show_inside(ui, |ui| {
-                render_nav(ui, &nav, &mut self.active_tab, &mut self.dark_mode);
+                render_nav(
+                    ui,
+                    &nav,
+                    &mut self.active_tab,
+                    &mut self.dark_mode,
+                    &mut self.nav_collapsed,
+                );
             });
 
         // Right context pane (320px).
@@ -321,7 +412,11 @@ impl eframe::App for CcplanApp {
                         .inner_margin(Margin::symmetric(12, 8)),
                 )
                 .show_inside(ui, |ui| {
-                    render_command_bar(ui, &mut self.command_input, self.cmd_bar_id);
+                    if let Some(text) =
+                        render_command_bar(ui, &mut self.command_input, self.cmd_bar_id)
+                    {
+                        self.execute_command_text(&text);
+                    }
                 });
 
             egui::CentralPanel::default().show_inside(ui, |ui| match self.active_tab {
@@ -368,73 +463,29 @@ impl eframe::App for CcplanApp {
         });
 
         // Execute collected actions (after all borrows are released).
-        let had_actions = !pending_actions.is_empty();
-        for action in &pending_actions {
+        for action in pending_actions {
             self.execute_action(action);
         }
-        if had_actions {
-            self.refresh_data();
-        }
 
-        // Toasts at bottom-center.
-        render_toasts(ui, &mut self.toasts);
+        // Toasts at bottom-center. Collect any undo actions triggered by clicking "Undo".
+        let undo_actions = render_toasts(ui, &mut self.toasts);
+        for action in undo_actions {
+            self.execute_action(action);
+        }
     }
 }
 
 // ── Left nav ──────────────────────────────────────────────────────────────────
 
-fn render_nav(
-    ui: &mut egui::Ui,
-    nav: &super::model::NavModel,
-    active_tab: &mut NavTab,
-    dark_mode: &mut bool,
-) {
-    ui.style_mut().spacing.item_spacing = egui::Vec2::new(0.0, 2.0);
-
-    for tab in [
-        NavTab::Today,
-        NavTab::Upcoming,
-        NavTab::Automations,
-        NavTab::Agents,
-        NavTab::Activity,
-        NavTab::Approvals,
-    ] {
-        let label = nav_label(tab, nav);
-        let is_active = nav.active_tab == tab;
-
-        let resp = egui::Frame::new()
-            .fill(if is_active {
-                SURFACE2
-            } else {
-                Color32::TRANSPARENT
-            })
-            .inner_margin(Margin::symmetric(16, 10))
-            .show(ui, |ui| {
-                ui.set_min_size(egui::Vec2::new(208.0, 44.0));
-                let color = if is_active { TEXT1 } else { TEXT2 };
-                ui.colored_label(color, &label);
-            });
-
-        if resp.response.interact(egui::Sense::click()).clicked() {
-            *active_tab = tab;
-        }
-
-        // 3px accent left border when active.
-        if is_active {
-            let rect = resp.response.rect;
-            let bar = egui::Rect::from_min_size(rect.min, egui::Vec2::new(3.0, rect.height()));
-            ui.painter().rect_filled(bar, 0.0, ACCENT);
-        }
+fn nav_icon(tab: NavTab) -> &'static str {
+    match tab {
+        NavTab::Today => "⌂",
+        NavTab::Upcoming => "◎",
+        NavTab::Automations => "↻",
+        NavTab::Agents => "⚡",
+        NavTab::Activity => "☰",
+        NavTab::Approvals => "✓",
     }
-
-    ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
-        ui.add_space(8.0);
-        ui.horizontal(|ui| {
-            if ui.button(if *dark_mode { "☀" } else { "☾" }).clicked() {
-                *dark_mode = !*dark_mode;
-            }
-        });
-    });
 }
 
 fn nav_label(tab: NavTab, nav: &super::model::NavModel) -> String {
@@ -446,7 +497,7 @@ fn nav_label(tab: NavTab, nav: &super::model::NavModel) -> String {
         NavTab::Activity => "Activity".to_owned(),
         NavTab::Approvals => {
             if nav.pending_approvals_count > 0 {
-                format!("Approvals ({})", nav.pending_approvals_count)
+                format!("Approvals  {}", nav.pending_approvals_count)
             } else {
                 "Approvals".to_owned()
             }
@@ -454,13 +505,132 @@ fn nav_label(tab: NavTab, nav: &super::model::NavModel) -> String {
     }
 }
 
+fn render_nav(
+    ui: &mut egui::Ui,
+    nav: &super::model::NavModel,
+    active_tab: &mut NavTab,
+    dark_mode: &mut bool,
+    collapsed: &mut bool,
+) {
+    ui.style_mut().spacing.item_spacing = egui::Vec2::new(0.0, 2.0);
+
+    // Collapse/expand toggle at the top.
+    {
+        let toggle_icon = if *collapsed { "»" } else { "«" };
+        let resp = egui::Frame::new()
+            .fill(Color32::TRANSPARENT)
+            .inner_margin(Margin::symmetric(16, 10))
+            .show(ui, |ui| {
+                ui.set_min_size(egui::Vec2::new(if *collapsed { 32.0 } else { 208.0 }, 44.0));
+                ui.colored_label(TEXT_DIM, toggle_icon);
+            });
+        if resp.response.interact(egui::Sense::click()).clicked() {
+            *collapsed = !*collapsed;
+        }
+    }
+
+    for tab in [
+        NavTab::Today,
+        NavTab::Upcoming,
+        NavTab::Automations,
+        NavTab::Agents,
+        NavTab::Activity,
+        NavTab::Approvals,
+    ] {
+        let icon = nav_icon(tab);
+        let label = nav_label(tab, nav);
+        let is_active = nav.active_tab == tab;
+
+        let resp = egui::Frame::new()
+            .fill(Color32::TRANSPARENT)
+            .inner_margin(Margin::symmetric(16, 10))
+            .show(ui, |ui| {
+                ui.set_min_size(egui::Vec2::new(if *collapsed { 32.0 } else { 208.0 }, 44.0));
+                let color = if is_active { TEXT1 } else { TEXT2 };
+                if *collapsed {
+                    ui.label(egui::RichText::new(icon).size(20.0).color(color));
+                } else {
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new(icon).size(20.0).color(color));
+                        ui.add_space(8.0);
+                        ui.label(egui::RichText::new(&label).size(13.0).color(color));
+                    });
+                }
+            });
+
+        let interact = resp.response.interact(egui::Sense::click());
+        if interact.clicked() {
+            *active_tab = tab;
+        }
+
+        // Hover fill → surface.
+        if interact.hovered() && !is_active {
+            ui.painter().rect_filled(interact.rect, 4.0, SURFACE);
+        }
+
+        // Active: surface-2 bg + 3px accent left border.
+        if is_active {
+            ui.painter().rect_filled(interact.rect, 4.0, SURFACE2);
+            let bar = egui::Rect::from_min_size(
+                interact.rect.min,
+                egui::Vec2::new(3.0, interact.rect.height()),
+            );
+            ui.painter().rect_filled(bar, 0.0, ACCENT);
+        }
+    }
+
+    ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
+        ui.add_space(8.0);
+        // Theme toggle.
+        {
+            let theme_icon = if *dark_mode { "☀" } else { "☾" };
+            let resp = egui::Frame::new()
+                .fill(Color32::TRANSPARENT)
+                .inner_margin(Margin::symmetric(16, 10))
+                .show(ui, |ui| {
+                    ui.set_min_size(egui::Vec2::new(if *collapsed { 32.0 } else { 208.0 }, 44.0));
+                    ui.colored_label(TEXT2, theme_icon);
+                });
+            if resp.response.interact(egui::Sense::click()).clicked() {
+                *dark_mode = !*dark_mode;
+            }
+        }
+        // Settings footer item.
+        {
+            let resp = egui::Frame::new()
+                .fill(Color32::TRANSPARENT)
+                .inner_margin(Margin::symmetric(16, 10))
+                .show(ui, |ui| {
+                    ui.set_min_size(egui::Vec2::new(if *collapsed { 32.0 } else { 208.0 }, 44.0));
+                    if *collapsed {
+                        ui.label(egui::RichText::new("⚙").size(20.0).color(TEXT2));
+                    } else {
+                        ui.horizontal(|ui| {
+                            ui.label(egui::RichText::new("⚙").size(20.0).color(TEXT2));
+                            ui.add_space(8.0);
+                            ui.label(egui::RichText::new("Settings").size(13.0).color(TEXT2));
+                        });
+                    }
+                });
+            let _ = resp.response.interact(egui::Sense::click());
+        }
+    });
+}
+
 // ── Command bar ───────────────────────────────────────────────────────────────
 
-fn render_command_bar(ui: &mut egui::Ui, input: &mut String, bar_id: egui::Id) {
+/// Returns Some(input text) when the user presses Enter, None otherwise.
+fn render_command_bar(ui: &mut egui::Ui, input: &mut String, bar_id: egui::Id) -> Option<String> {
+    let mut submitted: Option<String> = None;
     ui.horizontal(|ui| {
+        let hint = if input.is_empty() {
+            "What do you want to do?   /add, /remind …"
+        } else {
+            ""
+        };
         let te = egui::TextEdit::singleline(input)
-            .hint_text("What do you want to do?  (/add, /remind …)")
-            .desired_width(f32::INFINITY)
+            .hint_text(hint)
+            .desired_width(ui.available_width() - 32.0)
             .id(bar_id)
             .frame(egui::Frame::NONE)
             .text_color(TEXT1);
@@ -468,11 +638,13 @@ fn render_command_bar(ui: &mut egui::Ui, input: &mut String, bar_id: egui::Id) {
 
         ui.colored_label(TEXT_DIM, "⌘K");
 
-        if resp.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
-            // Send to agent / parse slash command — for now, clear on Enter.
+        if resp.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) && !input.trim().is_empty()
+        {
+            submitted = Some(input.trim().to_owned());
             input.clear();
         }
     });
+    submitted
 }
 
 // ── Right context pane ────────────────────────────────────────────────────────
@@ -560,21 +732,24 @@ fn render_today(
     let mut new_hovered: Option<String> = None;
 
     let Some(model) = model else {
-        ui.centered_and_justified(|ui| {
+        ui.add_space(40.0);
+        ui.vertical_centered(|ui| {
+            ui.colored_label(TEXT2, "Nothing scheduled. Type what you want to do above.");
+            ui.add_space(8.0);
             ui.colored_label(
                 TEXT_DIM,
-                "Nothing scheduled. Type what you want to do above.",
+                "Or create a block in the terminal: ccplan add \"My block\" --at 09:00 --for 1h",
             );
         });
         return (None, None);
     };
 
     if model.cards.is_empty() {
-        ui.centered_and_justified(|ui| {
-            ui.colored_label(
-                TEXT_DIM,
-                "Nothing scheduled. Type what you want to do above.",
-            );
+        ui.add_space(40.0);
+        ui.vertical_centered(|ui| {
+            ui.colored_label(TEXT2, "Nothing scheduled. Type what you want to do above.");
+            ui.add_space(8.0);
+            ui.colored_label(TEXT_DIM, format!("No blocks on {}.", model.date_label));
         });
         return (None, None);
     }
@@ -628,6 +803,8 @@ fn render_now_line(ui: &mut egui::Ui, label: &str) {
     ui.add_space(4.0);
 }
 
+const ACTIVE_TINT: Color32 = Color32::from_rgb(0x10, 0x23, 0x1A);
+
 /// Returns whether the card was clicked, whether it is hovered, and an optional kebab action.
 fn render_block_card(
     ui: &mut egui::Ui,
@@ -636,36 +813,54 @@ fn render_block_card(
     is_hovered: bool,
     _actions: &mut Vec<GuiAction>,
 ) -> (bool, bool, Option<GuiAction>) {
+    use crate::model::Status;
     let mut clicked = false;
     let mut kebab_action: Option<GuiAction> = None;
 
-    let fill = if is_selected { SURFACE2 } else { SURFACE };
+    let is_active = card.status == Status::Active;
+    let is_terminal = matches!(card.status, Status::Done | Status::Skipped);
+
+    let fill = if is_active {
+        ACTIVE_TINT
+    } else if is_selected {
+        SURFACE2
+    } else {
+        SURFACE
+    };
     let stroke_color = if is_selected { ACCENT } else { BORDER };
-    let status_color = status_color(card.status);
+    let card_status_color = status_color(card.status);
 
     let frame_resp = egui::Frame::new()
         .fill(fill)
-        .stroke(Stroke::new(1.0_f32,stroke_color))
+        .stroke(Stroke::new(1.0_f32, stroke_color))
         .corner_radius(8.0)
         .inner_margin(Margin::symmetric(12, 12))
         .show(ui, |ui| {
             ui.set_min_width(ui.available_width() - 4.0);
 
             ui.horizontal(|ui| {
-                // Row 1: time range · title · countdown (right-aligned).
-                ui.colored_label(TEXT2, &card.time_range);
+                // Row 1: monospace time (13px text-2) · title (15px semibold) · countdown chip.
+                ui.label(
+                    egui::RichText::new(&card.time_range)
+                        .monospace()
+                        .size(13.0)
+                        .color(TEXT2),
+                );
                 ui.add_space(8.0);
 
-                let title_color = if card.status == crate::model::Status::Active {
-                    C_GREEN
-                } else {
-                    TEXT1
-                };
-                ui.colored_label(title_color, &card.title);
+                let title_color = if is_active { C_GREEN } else { TEXT1 };
+                let mut title_rt = egui::RichText::new(&card.title)
+                    .size(15.0)
+                    .strong()
+                    .color(title_color);
+                if is_terminal {
+                    title_rt = title_rt.strikethrough().color(TEXT_DIM);
+                }
+                ui.label(title_rt);
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    // Hover kebab: show Done / Skip buttons on hover.
-                    if is_hovered {
+                    // Hover kebab: Done / Skip.
+                    if is_hovered && !card.status.is_terminal() {
                         if ui.small_button("Skip").clicked() {
                             kebab_action = Some(GuiAction::Skip(card.id.clone()));
                         }
@@ -673,11 +868,16 @@ fn render_block_card(
                             kebab_action = Some(GuiAction::Done(card.id.clone()));
                         }
                     }
-                    ui.monospace(&card.countdown);
+                    ui.label(
+                        egui::RichText::new(&card.countdown)
+                            .monospace()
+                            .size(13.0)
+                            .color(TEXT2),
+                    );
                 });
             });
 
-            // Row 2: tags + badges (only when non-empty).
+            // Row 2: tag pills (11px) + badges — only when non-empty.
             let has_row2 = !card.tags.is_empty()
                 || card.has_recurrence
                 || card.has_run
@@ -686,24 +886,32 @@ fn render_block_card(
                 || card.has_expect_by_breach;
 
             if has_row2 {
+                ui.add_space(4.0);
                 ui.horizontal(|ui| {
                     for tag in &card.tags {
-                        ui.colored_label(TEXT_DIM, format!("  {tag}"));
+                        egui::Frame::new()
+                            .fill(SURFACE2)
+                            .corner_radius(999.0)
+                            .inner_margin(Margin::symmetric(6, 2))
+                            .show(ui, |ui| {
+                                ui.label(egui::RichText::new(tag.as_str()).size(11.0).color(TEXT2));
+                            });
+                        ui.add_space(4.0);
                     }
                     if card.has_recurrence {
-                        ui.colored_label(TEXT2, " ↻");
+                        ui.label(egui::RichText::new("↻").size(11.0).color(TEXT2));
                     }
                     if card.has_run {
-                        ui.colored_label(TEXT2, " ▶");
+                        ui.label(egui::RichText::new("▶").size(11.0).color(TEXT2));
                     }
                     if card.awaiting_approval {
-                        ui.colored_label(C_AMBER, " ⏳");
+                        ui.label(egui::RichText::new("⏳").size(11.0).color(C_AMBER));
                     }
                     if card.has_agent {
-                        ui.colored_label(TEXT2, " 🤖");
+                        ui.label(egui::RichText::new("🤖").size(11.0));
                     }
                     if card.has_expect_by_breach {
-                        ui.colored_label(C_RED, " !");
+                        ui.label(egui::RichText::new("!").size(11.0).color(C_RED));
                     }
                 });
             }
@@ -713,7 +921,7 @@ fn render_block_card(
     let card_rect = frame_resp.response.rect;
     let bar_rect =
         egui::Rect::from_min_size(card_rect.min, egui::Vec2::new(4.0, card_rect.height()));
-    ui.painter().rect_filled(bar_rect, 4.0, status_color);
+    ui.painter().rect_filled(bar_rect, 4.0, card_status_color);
 
     let interact = frame_resp.response.interact(egui::Sense::click());
     if interact.clicked() {
@@ -781,7 +989,7 @@ fn render_automations(ui: &mut egui::Ui, model: &super::model::AutomationsModel)
             ui.add_space(8.0);
             egui::Frame::new()
                 .fill(SURFACE)
-                .stroke(Stroke::new(1.0_f32,BORDER))
+                .stroke(Stroke::new(1.0_f32, BORDER))
                 .corner_radius(8.0)
                 .inner_margin(Margin::same(12))
                 .show(ui, |ui| {
@@ -826,7 +1034,7 @@ fn render_agents(ui: &mut egui::Ui, model: &super::model::AgentsModel) {
             ui.add_space(8.0);
             egui::Frame::new()
                 .fill(SURFACE)
-                .stroke(Stroke::new(1.0_f32,BORDER))
+                .stroke(Stroke::new(1.0_f32, BORDER))
                 .corner_radius(8.0)
                 .inner_margin(Margin::same(12))
                 .show(ui, |ui| {
@@ -885,7 +1093,7 @@ fn render_approvals(ui: &mut egui::Ui, model: &ApprovalsModel, actions: &mut Vec
             ui.add_space(8.0);
             egui::Frame::new()
                 .fill(SURFACE)
-                .stroke(Stroke::new(1.0_f32,BORDER))
+                .stroke(Stroke::new(1.0_f32, BORDER))
                 .corner_radius(8.0)
                 .inner_margin(Margin::same(12))
                 .show(ui, |ui| {
@@ -920,7 +1128,7 @@ fn render_approvals(ui: &mut egui::Ui, model: &ApprovalsModel, actions: &mut Vec
                             .add(
                                 egui::Button::new(egui::RichText::new("Dismiss").color(TEXT2))
                                     .fill(Color32::TRANSPARENT)
-                                    .stroke(Stroke::new(1.0_f32,BORDER))
+                                    .stroke(Stroke::new(1.0_f32, BORDER))
                                     .corner_radius(4.0),
                             )
                             .clicked()
@@ -935,14 +1143,15 @@ fn render_approvals(ui: &mut egui::Ui, model: &ApprovalsModel, actions: &mut Vec
 
 // ── Toasts ────────────────────────────────────────────────────────────────────
 
-fn render_toasts(ui: &mut egui::Ui, toasts: &mut Vec<Toast>) {
+fn render_toasts(ui: &mut egui::Ui, toasts: &mut Vec<Toast>) -> Vec<GuiAction> {
     const TOAST_LIFETIME_SECS: u64 = 4;
+    let mut undo_actions: Vec<GuiAction> = Vec::new();
 
     // Expire old toasts.
     toasts.retain(|t| t.created.elapsed().as_secs() < TOAST_LIFETIME_SECS);
 
     if toasts.is_empty() {
-        return;
+        return undo_actions;
     }
 
     // Position toast window at bottom-center.
@@ -950,22 +1159,60 @@ fn render_toasts(ui: &mut egui::Ui, toasts: &mut Vec<Toast>) {
     let x = screen_rect.center().x;
     let y = screen_rect.max.y - 60.0;
 
+    let mut dismiss_indices: Vec<usize> = Vec::new();
+
     for (i, toast) in toasts.iter().enumerate() {
         let bg = if toast.is_error { C_RED } else { SURFACE2 };
         let border = if toast.is_error { C_RED } else { ACCENT };
 
-        egui::Area::new(egui::Id::new("toast").with(i))
-            .fixed_pos(egui::Pos2::new(x - 150.0, y - f32::from(u8::try_from(i.min(20)).unwrap_or(20)) * 44.0))
+        let area_resp = egui::Area::new(egui::Id::new("toast").with(i))
+            .fixed_pos(egui::Pos2::new(
+                x - 180.0,
+                y - f32::from(u8::try_from(i.min(20)).unwrap_or(20)) * 52.0,
+            ))
             .show(ui.ctx(), |ui| {
                 egui::Frame::new()
                     .fill(bg)
-                    .stroke(Stroke::new(1.0_f32,border))
+                    .stroke(Stroke::new(1.0_f32, border))
                     .corner_radius(8.0)
                     .inner_margin(Margin::symmetric(16, 10))
                     .show(ui, |ui| {
                         ui.set_min_width(300.0);
-                        ui.colored_label(TEXT1, &toast.message);
+                        ui.horizontal(|ui| {
+                            ui.colored_label(TEXT1, &toast.message);
+                            if toast.undo_action.is_some() {
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        if ui
+                                            .add(
+                                                egui::Button::new(
+                                                    egui::RichText::new("Undo").color(ACCENT),
+                                                )
+                                                .fill(Color32::TRANSPARENT),
+                                            )
+                                            .clicked()
+                                        {
+                                            dismiss_indices.push(i);
+                                        }
+                                    },
+                                );
+                            }
+                        });
                     });
             });
+        let _ = area_resp;
     }
+
+    // Take undo actions for dismissed toasts (drain in reverse to preserve indices).
+    for &idx in dismiss_indices.iter().rev() {
+        if idx < toasts.len() {
+            let toast = toasts.remove(idx);
+            if let Some(action) = toast.undo_action {
+                undo_actions.push(action);
+            }
+        }
+    }
+
+    undo_actions
 }
