@@ -15,17 +15,17 @@ use serde::Serialize;
 
 use crate::{
     cli::{
-        AddArgs, AgendaArgs, ApplyArgs, ClearArgs, Cli, Commands, EditArgs, FireArgs, LogArgs,
-        MaterializeArgs, ReadArgs, RemindArgs, SetArgs, Shell, SnoozeArgs, TemplateArgs,
-        TemplateCommand, TemplateNameArgs, WatchArgs,
+        AddArgs, AgendaArgs, ApplyArgs, ApproveArgs, ClearArgs, Cli, Commands, DiffArgs, EditArgs,
+        FireArgs, LogArgs, MaterializeArgs, ReadArgs, RemindArgs, SetArgs, Shell, SnoozeArgs,
+        TemplateArgs, TemplateCommand, TemplateNameArgs, WatchArgs,
     },
     config::AutomationConfig,
     context::{ContextRefs, Notification, Scheduler},
     error::{Error, Result},
-    lifecycle::{Event, FireDecision, decide_fire, reconcile_overdue},
+    lifecycle::{Event, FireDecision, awaiting_approval, decide_fire, reconcile_overdue},
     model::{
-        Block, BlockId, ClockTime, DurationSpec, Lead, Plan, PlanDate, Run, ScheduleRev, Span,
-        Status, TimeZoneName,
+        Approval, Block, BlockId, ClockTime, DurationSpec, Lead, Plan, PlanDate, Run, ScheduleRev,
+        Span, Status, TimeZoneName,
     },
     store::{
         FireRecord, FiredEventKey, FiredStatus, HistoryPolicy, Store, TriggerKind, TriggerRecord,
@@ -55,6 +55,8 @@ pub fn dispatch(
         Some(Commands::Agenda(args)) => agenda(args, out, context),
         Some(Commands::Watch(args)) => watch(args, out, context),
         Some(Commands::Apply(args)) => apply(args, out, context),
+        Some(Commands::Diff(args)) => diff(args, out, context),
+        Some(Commands::Approve(args)) => approve(args, out, context),
         Some(Commands::Materialize(args)) => materialize(&args, out, context),
         Some(Commands::Fire(args)) => fire(&args, out, context),
         Some(Commands::Roll) => roll(out, context),
@@ -680,6 +682,36 @@ fn apply(args: ApplyArgs, out: &mut dyn Write, context: &ContextRefs<'_>) -> Res
     write_reconcile_summary(out, &changes)
 }
 
+fn diff(args: DiffArgs, out: &mut dyn Write, context: &ContextRefs<'_>) -> Result<()> {
+    apply(
+        ApplyArgs {
+            date: args.date,
+            dry_run: true,
+        },
+        out,
+        context,
+    )
+}
+
+fn approve(args: ApproveArgs, out: &mut dyn Write, context: &ContextRefs<'_>) -> Result<()> {
+    let date = args.date.unwrap_or_else(|| today(context));
+    update_plan(context, &date, |existing| {
+        let mut plan = required_plan(existing, &date)?;
+        let block = find_block_mut(&mut plan, &args.id)?;
+        ensure_non_terminal(block)?;
+        if block.run.is_none() {
+            return Err(Error::Usage(format!(
+                "block `{}` has no run command to approve",
+                args.id
+            )));
+        }
+        block.approval = Some(Approval::Approved);
+        Ok(plan)
+    })?;
+    writeln!(out, "approved {} on {date}", args.id)?;
+    Ok(())
+}
+
 /// Expands recurring templates into concrete dated occurrences for the next `horizon` days.
 ///
 /// For each date in `[today, today+horizon)`, materializes the recurring rules, merges with any
@@ -833,7 +865,11 @@ fn fire(args: &FireArgs, out: &mut dyn Write, context: &ContextRefs<'_>) -> Resu
     };
     let result = match decision {
         FireDecision::NoOp => {
-            detail.push_str("no-op");
+            if args.event == Event::Start && awaiting_approval(&plan.blocks[index]) {
+                detail.push_str("awaiting-approval");
+            } else {
+                detail.push_str("no-op");
+            }
             Ok(())
         }
         FireDecision::Notify => {

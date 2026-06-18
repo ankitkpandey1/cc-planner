@@ -25,6 +25,8 @@ pub(crate) fn command() -> Command {
         .subcommand(read_command("agenda"))
         .subcommand(watch_command())
         .subcommand(apply_command())
+        .subcommand(diff_command())
+        .subcommand(approve_command())
         .subcommand(materialize_command())
         .subcommand(fire_command())
         .subcommand(Command::new("roll").hide(true))
@@ -113,6 +115,16 @@ fn apply_command() -> Command {
     Command::new("apply")
         .arg(date_arg())
         .arg(flag("dry_run", "dry-run"))
+}
+
+fn diff_command() -> Command {
+    Command::new("diff").arg(date_arg())
+}
+
+fn approve_command() -> Command {
+    Command::new("approve")
+        .arg(Arg::new("id").required(true).value_name(ID))
+        .arg(date_arg())
 }
 
 fn materialize_command() -> Command {

@@ -37,6 +37,8 @@ pub enum Commands {
     Agenda(AgendaArgs),
     Watch(WatchArgs),
     Apply(ApplyArgs),
+    Diff(DiffArgs),
+    Approve(ApproveArgs),
     Materialize(MaterializeArgs),
     Fire(FireArgs),
     #[command(hide = true)]
@@ -174,6 +176,19 @@ pub struct ApplyArgs {
     pub date: Option<PlanDate>,
     #[arg(long)]
     pub dry_run: bool,
+}
+
+#[derive(Debug, Args)]
+pub struct DiffArgs {
+    #[arg(long)]
+    pub date: Option<PlanDate>,
+}
+
+#[derive(Debug, Args)]
+pub struct ApproveArgs {
+    pub id: BlockId,
+    #[arg(long)]
+    pub date: Option<PlanDate>,
 }
 
 #[derive(Debug, Args)]

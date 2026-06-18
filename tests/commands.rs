@@ -9,8 +9,8 @@ use ccplan::{
     error::Error,
     lifecycle::{EndBehavior, LifecyclePolicy},
     model::{
-        Block, BlockId, ClockTime, DurationSpec, Lead, Plan, PlanDate, Retry, Run, Span, Status,
-        TimeZoneName,
+        Approval, Block, BlockId, ClockTime, DurationSpec, Lead, Plan, PlanDate, Retry, Run, Span,
+        Status, TimeZoneName,
     },
     run_with_context,
     store::{HistoryPolicy, Store, StoreError, TriggerKind, TriggerRecord},
@@ -606,6 +606,128 @@ fn apply_dry_run_reports_diff_and_real_apply_is_idempotent() {
 }
 
 #[test]
+fn diff_reports_plan_vs_applied_without_scheduler_side_effects() {
+    let (_temp, context) = test_context_at("2026-06-08T10:00:00+05:30[Asia/Kolkata]");
+    context
+        .store
+        .set_plan(&plan(), HistoryPolicy::Preserve)
+        .unwrap();
+
+    let diff = String::from_utf8(run_ok(&context, ["ccplan", "diff"])).unwrap();
+
+    assert!(
+        diff.contains("add "),
+        "diff should show desired triggers: {diff}"
+    );
+    assert!(context.scheduler.calls().is_empty());
+    assert!(context.store.list_triggers().unwrap().is_empty());
+
+    run_ok(&context, ["ccplan", "apply"]);
+    context.scheduler.clear_calls();
+
+    let diff = String::from_utf8(run_ok(&context, ["ccplan", "diff"])).unwrap();
+
+    assert_eq!(diff.trim(), "no changes");
+    assert!(context.scheduler.calls().is_empty());
+}
+
+#[test]
+fn pending_run_block_does_not_fire_and_records_awaiting_approval() {
+    let (_temp, mut context) = test_context_at("2026-06-08T11:00:00+05:30[Asia/Kolkata]");
+    let exe = if cfg!(windows) {
+        "C:\\Windows\\System32\\cmd.exe"
+    } else {
+        "/bin/echo"
+    };
+    context.config.automation.enabled = true;
+    context.config.automation.allowed_executables = vec![std::path::PathBuf::from(exe)];
+
+    let mut run_plan = plan();
+    run_plan.blocks[0].run = Some(Run::new(vec![exe.to_owned()]).unwrap());
+    context
+        .store
+        .set_plan(&run_plan, HistoryPolicy::Preserve)
+        .unwrap();
+    let rev = focus_rev(&context);
+
+    run_ok(
+        &context,
+        fire_args("focus", "start", rev.as_str(), "2026-06-08T05:30:00Z"),
+    );
+
+    let stored = context.store.load_plan(&date()).unwrap().unwrap();
+    assert_eq!(stored.blocks[0].status, Status::Pending);
+    assert_eq!(stored.blocks[0].approval, Some(Approval::Pending));
+    assert!(context.notifier.notifications().is_empty());
+    let logged = std::fs::read_to_string(context.store.fire_log_path()).unwrap();
+    assert!(logged.contains("\"outcome\":\"no-op\""), "{logged}");
+    assert!(logged.contains("awaiting-approval"), "{logged}");
+}
+
+#[test]
+fn approve_flips_run_block_and_allows_later_fire() {
+    let (_temp, mut context) = test_context_at("2026-06-08T11:00:00+05:30[Asia/Kolkata]");
+    let exe = if cfg!(windows) {
+        "C:\\Windows\\System32\\cmd.exe"
+    } else {
+        "/bin/echo"
+    };
+    context.config.automation.enabled = true;
+    context.config.automation.allowed_executables = vec![std::path::PathBuf::from(exe)];
+
+    let mut run_plan = plan();
+    let argv = if cfg!(windows) {
+        vec![exe.to_owned(), "/c".to_owned(), "echo".to_owned()]
+    } else {
+        vec![exe.to_owned()]
+    };
+    run_plan.blocks[0].run = Some(Run::new(argv).unwrap());
+    context
+        .store
+        .set_plan(&run_plan, HistoryPolicy::Preserve)
+        .unwrap();
+
+    let output = String::from_utf8(run_ok(&context, ["ccplan", "approve", "focus"])).unwrap();
+    assert!(output.contains("approved focus"), "{output}");
+    let stored = context.store.load_plan(&date()).unwrap().unwrap();
+    assert_eq!(stored.blocks[0].approval, Some(Approval::Approved));
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let plan_path = context.store.plan_path(&date());
+        let mut perms = std::fs::metadata(&plan_path).unwrap().permissions();
+        perms.set_mode(0o600);
+        std::fs::set_permissions(&plan_path, perms).unwrap();
+    }
+
+    let rev = focus_rev(&context);
+    run_ok(
+        &context,
+        fire_args("focus", "start", rev.as_str(), "2026-06-08T05:30:00Z"),
+    );
+
+    let stored = context.store.load_plan(&date()).unwrap().unwrap();
+    assert_eq!(stored.blocks[0].status, Status::Active);
+    assert_eq!(context.notifier.notifications().len(), 1);
+    let logged = std::fs::read_to_string(context.store.fire_log_path()).unwrap();
+    assert!(logged.contains("activated run"), "{logged}");
+}
+
+#[test]
+fn approve_refuses_block_without_run_command() {
+    let (_temp, context) = test_context_at("2026-06-08T10:00:00+05:30[Asia/Kolkata]");
+    context
+        .store
+        .set_plan(&plan(), HistoryPolicy::Preserve)
+        .unwrap();
+
+    let err = run_err(&context, ["ccplan", "approve", "focus"]);
+
+    assert!(matches!(err, Error::Usage(message) if message.contains("has no run command")));
+}
+
+#[test]
 fn clear_requires_yes_and_purge_removes_without_archive() {
     let (_temp, context) = test_context_at("2026-06-08T10:00:00+05:30[Asia/Kolkata]");
     context
@@ -830,6 +952,7 @@ fn fire_covers_missing_notify_missed_close_and_run_deferred_paths() {
         vec![exe.to_owned()]
     };
     run_plan.blocks[0].run = Some(Run::new(run_argv).unwrap());
+    run_plan.blocks[0].approval = Some(Approval::Approved);
     run_context
         .store
         .set_plan(&run_plan, HistoryPolicy::Preserve)
@@ -1526,10 +1649,7 @@ impl LimitedWriter {
 impl std::io::Write for LimitedWriter {
     fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
         if self.buf.len() + data.len() > self.budget {
-            Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "budget exhausted",
-            ))
+            Err(std::io::Error::other("budget exhausted"))
         } else {
             self.buf.extend_from_slice(data);
             Ok(data.len())
@@ -1616,6 +1736,7 @@ fn test_automation_refused_when_disabled() {
     context.config.automation.enabled = false;
     let mut run_plan = plan();
     run_plan.blocks[0].run = Some(Run::new(vec!["/bin/echo".to_owned()]).unwrap());
+    run_plan.blocks[0].approval = Some(Approval::Approved);
     context
         .store
         .set_plan(&run_plan, HistoryPolicy::Preserve)
@@ -1647,6 +1768,7 @@ fn test_automation_refused_when_not_absolute() {
     context.config.automation.allowed_executables = vec![std::path::PathBuf::from("echo")];
     let mut run_plan = plan();
     run_plan.blocks[0].run = Some(Run::new(vec!["echo".to_owned()]).unwrap());
+    run_plan.blocks[0].approval = Some(Approval::Approved);
     context
         .store
         .set_plan(&run_plan, HistoryPolicy::Preserve)
@@ -1689,6 +1811,7 @@ fn test_automation_refused_when_not_allowlisted() {
     context.config.automation.allowed_executables = vec![std::path::PathBuf::from(allowed_exe)];
     let mut run_plan = plan();
     run_plan.blocks[0].run = Some(Run::new(vec![run_exe.to_owned()]).unwrap());
+    run_plan.blocks[0].approval = Some(Approval::Approved);
     context
         .store
         .set_plan(&run_plan, HistoryPolicy::Preserve)
@@ -1721,6 +1844,7 @@ fn test_automation_refused_when_bad_permissions() {
     context.config.automation.allowed_executables = vec![std::path::PathBuf::from("/bin/echo")];
     let mut run_plan = plan();
     run_plan.blocks[0].run = Some(Run::new(vec!["/bin/echo".to_owned()]).unwrap());
+    run_plan.blocks[0].approval = Some(Approval::Approved);
     context
         .store
         .set_plan(&run_plan, HistoryPolicy::Preserve)
@@ -1767,6 +1891,7 @@ fn test_automation_runs_and_kills_on_timeout() {
 
     let mut run_plan = plan();
     run_plan.blocks[0].run = Some(Run::new(run_argv).unwrap());
+    run_plan.blocks[0].approval = Some(Approval::Approved);
     context
         .store
         .set_plan(&run_plan, HistoryPolicy::Preserve)
@@ -1818,6 +1943,7 @@ fn test_automation_dry_run_prints_command() {
         vec![exe.to_owned(), "hello".to_owned()]
     };
     run_plan.blocks[0].run = Some(Run::new(run_argv).unwrap());
+    run_plan.blocks[0].approval = Some(Approval::Approved);
     context
         .store
         .set_plan(&run_plan, HistoryPolicy::Preserve)
@@ -1964,6 +2090,7 @@ fn test_automation_truncates_large_output() {
 
     let mut run_plan = plan();
     run_plan.blocks[0].run = Some(Run::new(run_argv).unwrap());
+    run_plan.blocks[0].approval = Some(Approval::Approved);
     context
         .store
         .set_plan(&run_plan, HistoryPolicy::Preserve)
@@ -2123,6 +2250,7 @@ fn fire_activate_refused_arms_on_failure_successor() {
     };
     let mut p = two_block_chain_plan("focus", "lunch", "on_failure");
     p.blocks[0].run = Some(Run::new(vec![exe.to_owned()]).unwrap());
+    p.blocks[0].approval = Some(Approval::Approved);
     context.store.set_plan(&p, HistoryPolicy::Preserve).unwrap();
 
     #[cfg(unix)]
@@ -2157,6 +2285,7 @@ fn fire_run_failure_with_retry_schedules_retry_trigger() {
 
     let mut p = plan();
     p.blocks[0].run = Some(Run::new(vec!["/bin/false".to_owned()]).unwrap());
+    p.blocks[0].approval = Some(Approval::Approved);
     p.blocks[0].retry = Some(Retry {
         count: 2,
         backoff: DurationSpec::from_seconds(60).unwrap(),
@@ -2196,6 +2325,7 @@ fn fire_run_failure_with_retry_exhausted_does_not_reschedule() {
 
     let mut p = plan();
     p.blocks[0].run = Some(Run::new(vec!["/bin/false".to_owned()]).unwrap());
+    p.blocks[0].approval = Some(Approval::Approved);
     p.blocks[0].retry = Some(Retry {
         count: 2,
         backoff: DurationSpec::from_seconds(60).unwrap(),
@@ -2247,6 +2377,7 @@ fn fire_run_failure_retry_cross_midnight_swallowed_non_fatally() {
                 Span::Duration(DurationSpec::from_seconds(300).unwrap()),
             );
             b.run = Some(Run::new(vec!["/bin/false".to_owned()]).unwrap());
+            b.approval = Some(Approval::Approved);
             b.retry = Some(Retry {
                 count: 1,
                 backoff: DurationSpec::from_seconds(600).unwrap(),
