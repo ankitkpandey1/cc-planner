@@ -163,13 +163,25 @@ fn template_command() -> Command {
     Command::new("template")
         .subcommand(template_name_command("save"))
         .subcommand(Command::new("list"))
-        .subcommand(template_name_command("apply"))
+        .subcommand(template_apply_command())
 }
 
 fn template_name_command(name: &'static str) -> Command {
     Command::new(name)
         .arg(Arg::new("name").required(true).value_name("NAME"))
         .arg(date_arg())
+}
+
+fn template_apply_command() -> Command {
+    Command::new("apply")
+        .arg(Arg::new("name").required(true).value_name("NAME"))
+        .arg(date_arg())
+        .arg(
+            Arg::new("vars")
+                .long("var")
+                .value_name("NAME=VALUE")
+                .action(ArgAction::Append),
+        )
 }
 
 fn completions_command() -> Command {

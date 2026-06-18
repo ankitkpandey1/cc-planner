@@ -1483,6 +1483,137 @@ fn template_save_list_apply_round_trip_and_validation() {
     ));
 }
 
+#[test]
+fn template_apply_substitutes_named_variables() {
+    let (_temp, context) = test_context_at("2026-06-08T10:00:00+05:30[Asia/Kolkata]");
+    context
+        .store
+        .save_template(
+            "playbook",
+            r#"
+date = "2099-01-01"
+timezone = "Asia/Kolkata"
+
+[[block]]
+id = "focus"
+title = "${focus_title}"
+start = "09:00"
+duration = "${focus_minutes}m"
+"#,
+        )
+        .unwrap();
+
+    let applied = String::from_utf8(run_ok(
+        &context,
+        [
+            "ccplan",
+            "template",
+            "apply",
+            "playbook",
+            "--date",
+            "2026-06-09",
+            "--var",
+            "focus_title=Deep Focus",
+            "--var",
+            "focus_minutes=45",
+        ],
+    ))
+    .unwrap();
+
+    assert!(
+        applied.contains("applied template playbook to 2026-06-09"),
+        "{applied}"
+    );
+    let stored = context
+        .store
+        .load_plan(&"2026-06-09".parse::<PlanDate>().unwrap())
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.blocks[0].title, "Deep Focus");
+    assert_eq!(
+        stored.blocks[0].span,
+        Span::Duration(DurationSpec::from_seconds(45 * 60).unwrap())
+    );
+}
+
+#[test]
+fn template_apply_reports_variable_errors() {
+    let (_temp, context) = test_context_at("2026-06-08T10:00:00+05:30[Asia/Kolkata]");
+    context
+        .store
+        .save_template(
+            "playbook",
+            r#"
+date = "2099-01-01"
+timezone = "Asia/Kolkata"
+
+[[block]]
+id = "focus"
+title = "${focus_title}"
+start = "09:00"
+duration = "30m"
+"#,
+        )
+        .unwrap();
+
+    assert!(matches!(
+        run_err(
+            &context,
+            ["ccplan", "template", "apply", "playbook", "--var", "focus_title"]
+        ),
+        Error::Usage(message) if message.contains("NAME=VALUE")
+    ));
+    assert!(matches!(
+        run_err(
+            &context,
+            [
+                "ccplan",
+                "template",
+                "apply",
+                "playbook",
+                "--var",
+                "../escape=value",
+            ]
+        ),
+        Error::Usage(message) if message.contains("template name must be")
+    ));
+    assert!(matches!(
+        run_err(&context, ["ccplan", "template", "apply", "playbook"]),
+        Error::Usage(message) if message.contains("missing template variable `focus_title`")
+    ));
+
+    context
+        .store
+        .save_template(
+            "unterminated",
+            r#"
+date = "2099-01-01"
+timezone = "Asia/Kolkata"
+
+[[block]]
+id = "focus"
+title = "${focus_title"
+start = "09:00"
+duration = "30m"
+"#,
+        )
+        .unwrap();
+    assert!(matches!(
+        run_err(
+            &context,
+            [
+                "ccplan",
+                "template",
+                "apply",
+                "unterminated",
+                "--var",
+                "focus_title=Deep Focus",
+            ]
+        ),
+        Error::Usage(message) if message.contains("unterminated template variable")
+    ));
+}
+
 fn fire_args(id: &str, event: &str, rev: &str, at: &str) -> Vec<String> {
     vec![
         "ccplan".to_owned(),

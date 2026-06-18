@@ -16,7 +16,7 @@ use std::path::PathBuf;
 use crate::{
     cli::{
         AddArgs, AgendaArgs, ApplyArgs, BlockTarget, Commands, EditArgs, LogArgs, ReadArgs,
-        RemindArgs, SnoozeArgs, TemplateArgs, TemplateCommand, TemplateNameArgs,
+        RemindArgs, SnoozeArgs, TemplateApplyArgs, TemplateArgs, TemplateCommand, TemplateNameArgs,
     },
     commands::{self, set_from_str, slug_block_id},
     config::{AutomationConfig, Config},
@@ -352,7 +352,7 @@ fn invoke_save_template(args: &Value, context: &ContextRefs<'_>) -> Value {
 }
 
 fn invoke_apply_template(args: &Value, context: &ContextRefs<'_>) -> Value {
-    match template_name_cmd(args, "apply_template", TemplateCommand::Apply, context) {
+    match template_apply_cmd(args, context) {
         Ok(text) => tool_ok(&text),
         Err(e) => tool_error_from_err(&e),
     }
@@ -382,6 +382,24 @@ fn template_name_cmd(
         command: variant(TemplateNameArgs {
             name,
             date: extract_date(args),
+        }),
+    });
+    let mut out = Vec::new();
+    commands::dispatch(Some(cmd), &mut out, context)?;
+    Ok(String::from_utf8_lossy(&out).into_owned())
+}
+
+fn template_apply_cmd(args: &Value, context: &ContextRefs<'_>) -> Result<String> {
+    let name = args
+        .get("name")
+        .and_then(Value::as_str)
+        .ok_or_else(|| Error::Usage("apply_template requires 'name'".to_owned()))?
+        .to_owned();
+    let cmd = Commands::Template(TemplateArgs {
+        command: TemplateCommand::Apply(TemplateApplyArgs {
+            name,
+            date: extract_date(args),
+            vars: Vec::new(),
         }),
     });
     let mut out = Vec::new();
@@ -2826,6 +2844,11 @@ mod tests {
             "tools/call",
             json!({"name": "ccplan_apply_template", "arguments": {"name": "ghost"}}),
         ));
+        input.push_str(&req(
+            7,
+            "tools/call",
+            json!({"name": "ccplan_apply_template", "arguments": {}}),
+        ));
         let responses = run_serve(&context, input.as_bytes());
 
         assert_eq!(responses[0]["result"]["isError"], false);
@@ -2852,6 +2875,12 @@ mod tests {
             .as_str()
             .unwrap();
         assert!(missing.contains("not_found"), "{missing}");
+        // Missing required `name` on apply is also a structured error.
+        assert_eq!(responses[6]["result"]["isError"], true);
+        let err = responses[6]["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap();
+        assert!(err.contains("apply_template requires 'name'"), "{err}");
     }
 
     // --- Security / M4 tests ---

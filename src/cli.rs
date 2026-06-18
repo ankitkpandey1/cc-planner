@@ -245,7 +245,7 @@ pub enum TemplateCommand {
     /// List saved template names.
     List,
     /// Instantiate a template onto a date (resets statuses to pending) and apply it.
-    Apply(TemplateNameArgs),
+    Apply(TemplateApplyArgs),
 }
 
 #[derive(Debug, Args)]
@@ -253,6 +253,15 @@ pub struct TemplateNameArgs {
     pub name: String,
     #[arg(long)]
     pub date: Option<PlanDate>,
+}
+
+#[derive(Debug, Args)]
+pub struct TemplateApplyArgs {
+    pub name: String,
+    #[arg(long)]
+    pub date: Option<PlanDate>,
+    #[arg(long = "var", value_name = "NAME=VALUE")]
+    pub vars: Vec<String>,
 }
 
 #[derive(Debug, Args)]

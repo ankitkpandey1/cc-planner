@@ -17,7 +17,7 @@ use crate::{
     cli::{
         AddArgs, AgendaArgs, ApplyArgs, ApproveArgs, ClearArgs, Cli, Commands, DiffArgs, EditArgs,
         FireArgs, LogArgs, MaterializeArgs, ReadArgs, RemindArgs, SetArgs, Shell, SnoozeArgs,
-        TemplateArgs, TemplateCommand, TemplateNameArgs, WatchArgs,
+        TemplateApplyArgs, TemplateArgs, TemplateCommand, TemplateNameArgs, WatchArgs,
     },
     config::AutomationConfig,
     context::{ContextRefs, Notification, Scheduler},
@@ -391,7 +391,7 @@ fn template_list(out: &mut dyn Write, context: &ContextRefs<'_>) -> Result<()> {
 /// like `set`, so instantiating over a day that already holds terminal blocks is refused (exit 6)
 /// rather than silently erasing history.
 fn template_apply(
-    args: TemplateNameArgs,
+    args: TemplateApplyArgs,
     out: &mut dyn Write,
     context: &ContextRefs<'_>,
 ) -> Result<()> {
@@ -401,6 +401,8 @@ fn template_apply(
         .store
         .load_template(&name)?
         .ok_or_else(|| Error::NotFound(format!("template `{name}`")))?;
+    let vars = parse_template_vars(&args.vars)?;
+    let toml = substitute_template_vars(&toml, &vars)?;
     let mut plan = Plan::from_toml_with_default(&toml, context.config.notify.default_lead)?;
     plan.date = date.clone();
     for block in &mut plan.blocks {
@@ -434,6 +436,44 @@ fn validate_template_name(name: &str) -> Result<String> {
             "template name must be non-empty and use only letters, digits, '-' or '_': {name:?}"
         )))
     }
+}
+
+fn parse_template_vars(raw_vars: &[String]) -> Result<BTreeMap<String, String>> {
+    let mut vars = BTreeMap::new();
+    for raw in raw_vars {
+        let Some((name, value)) = raw.split_once('=') else {
+            return Err(Error::Usage(format!(
+                "template variable must be NAME=VALUE: {raw:?}"
+            )));
+        };
+        let name = validate_template_name(name)?;
+        vars.insert(name, value.to_owned());
+    }
+    Ok(vars)
+}
+
+fn substitute_template_vars(input: &str, vars: &BTreeMap<String, String>) -> Result<String> {
+    let mut output = String::with_capacity(input.len());
+    let mut rest = input;
+    while let Some(start) = rest.find("${") {
+        output.push_str(&rest[..start]);
+        let after_open = &rest[start + 2..];
+        let Some(end) = after_open.find('}') else {
+            return Err(Error::Usage(
+                "unterminated template variable; expected `}`".to_owned(),
+            ));
+        };
+        let name = validate_template_name(&after_open[..end])?;
+        let value = vars.get(&name).ok_or_else(|| {
+            Error::Usage(format!(
+                "missing template variable `{name}`; pass --var {name}=VALUE"
+            ))
+        })?;
+        output.push_str(value);
+        rest = &after_open[end + 1..];
+    }
+    output.push_str(rest);
+    Ok(output)
 }
 
 fn clear(args: ClearArgs, out: &mut dyn Write, context: &ContextRefs<'_>) -> Result<()> {
