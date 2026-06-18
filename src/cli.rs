@@ -37,7 +37,10 @@ pub enum Commands {
     Agenda(AgendaArgs),
     Watch(WatchArgs),
     Apply(ApplyArgs),
+    Materialize(MaterializeArgs),
     Fire(FireArgs),
+    #[command(hide = true)]
+    Roll,
     Log(LogArgs),
     Template(TemplateArgs),
     Status,
@@ -185,8 +188,18 @@ pub struct FireArgs {
     pub rev: ScheduleRev,
     #[arg(long)]
     pub at: Timestamp,
+    #[arg(long, default_value = "0")]
+    pub attempt: u32,
     #[arg(long)]
     pub dry_run: bool,
+}
+
+/// `materialize` expands recurring rules into concrete dated occurrences.
+#[derive(Debug, Args)]
+pub struct MaterializeArgs {
+    /// Number of days ahead to materialize (default 14).
+    #[arg(long, default_value = "14")]
+    pub horizon: u32,
 }
 
 /// `log` reads the fire ledger — what the scheduler actually did — for close-the-loop re-planning.

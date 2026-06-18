@@ -893,6 +893,11 @@ fn parse_mcp_block(val: &Value, index: usize, default_lead: Lead) -> Result<Bloc
         }
     };
 
+    let approval = if run.is_some() {
+        Some(crate::model::Approval::Pending)
+    } else {
+        None
+    };
     Ok(Block {
         id,
         title,
@@ -902,6 +907,16 @@ fn parse_mcp_block(val: &Value, index: usize, default_lead: Lead) -> Result<Bloc
         tags,
         status: Status::Pending,
         run,
+        recurrence: None,
+        origin: None,
+        after: vec![],
+        on_success: vec![],
+        on_failure: vec![],
+        on_missed: vec![],
+        retry: None,
+        expect_by: None,
+        approval,
+        agent: None,
     })
 }
 
@@ -1757,6 +1772,16 @@ mod tests {
                 tags: vec![],
                 status: Status::Done,
                 run: None,
+                recurrence: None,
+                origin: None,
+                after: vec![],
+                on_success: vec![],
+                on_failure: vec![],
+                on_missed: vec![],
+                retry: None,
+                expect_by: None,
+                approval: None,
+                agent: None,
             }],
         };
         context
@@ -2679,6 +2704,16 @@ mod tests {
                 tags: vec![],
                 status: Status::Pending,
                 run: None,
+                recurrence: None,
+                origin: None,
+                after: vec![],
+                on_success: vec![],
+                on_failure: vec![],
+                on_missed: vec![],
+                retry: None,
+                expect_by: None,
+                approval: None,
+                agent: None,
             }],
         };
         context
@@ -2743,6 +2778,16 @@ mod tests {
                 tags: vec![],
                 status: Status::Pending,
                 run: None,
+                recurrence: None,
+                origin: None,
+                after: vec![],
+                on_success: vec![],
+                on_failure: vec![],
+                on_missed: vec![],
+                retry: None,
+                expect_by: None,
+                approval: None,
+                agent: None,
             }],
         };
         context

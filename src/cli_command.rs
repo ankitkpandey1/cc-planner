@@ -25,7 +25,9 @@ pub(crate) fn command() -> Command {
         .subcommand(read_command("agenda"))
         .subcommand(watch_command())
         .subcommand(apply_command())
+        .subcommand(materialize_command())
         .subcommand(fire_command())
+        .subcommand(Command::new("roll").hide(true))
         .subcommand(log_command())
         .subcommand(template_command())
         .subcommand(Command::new("status"))
@@ -113,6 +115,15 @@ fn apply_command() -> Command {
         .arg(flag("dry_run", "dry-run"))
 }
 
+fn materialize_command() -> Command {
+    Command::new("materialize").arg(
+        Arg::new("horizon")
+            .long("horizon")
+            .default_value("14")
+            .value_name("N"),
+    )
+}
+
 fn fire_command() -> Command {
     Command::new("fire")
         .arg(date_arg().required(true))
@@ -125,6 +136,7 @@ fn fire_command() -> Command {
         )
         .arg(Arg::new("rev").long("rev").required(true))
         .arg(Arg::new("at").long("at").required(true))
+        .arg(Arg::new("attempt").long("attempt").default_value("0"))
         .arg(flag("dry_run", "dry-run"))
 }
 

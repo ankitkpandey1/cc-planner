@@ -319,6 +319,16 @@ fn block_with_id(id: &str, status: Status, start: &str, span: Span) -> Block {
         tags: Vec::new(),
         status,
         run: None,
+        recurrence: None,
+        origin: None,
+        after: vec![],
+        on_success: vec![],
+        on_failure: vec![],
+        on_missed: vec![],
+        retry: None,
+        expect_by: None,
+        approval: None,
+        agent: None,
     }
 }
 

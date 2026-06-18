@@ -18,6 +18,7 @@ pub mod lifecycle;
 pub mod mcp;
 pub mod model;
 mod platform;
+pub(crate) mod recurrence;
 pub mod store;
 pub mod time;
 

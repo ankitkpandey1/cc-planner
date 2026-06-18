@@ -80,6 +80,16 @@ fn block_with(status: Status, has_run: bool) -> Block {
         tags: Vec::new(),
         status,
         run: has_run.then(|| Run::new(vec!["/bin/echo".to_owned()]).unwrap()),
+        recurrence: None,
+        origin: None,
+        after: vec![],
+        on_success: vec![],
+        on_failure: vec![],
+        on_missed: vec![],
+        retry: None,
+        expect_by: None,
+        approval: None,
+        agent: None,
     }
 }
 
