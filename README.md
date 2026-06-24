@@ -7,6 +7,7 @@ Write a plain-text plan — or have an agent write it — and ccplan turns it in
 notifications, status tracking, and time-triggered commands. No daemon, no account, no cloud.
 
 [![CI](https://github.com/ankitkpandey1/ccplan/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/ankitkpandey1/ccplan/actions/workflows/ci.yml)
+[![crates.io](https://img.shields.io/crates/v/ccplan)](https://crates.io/crates/ccplan)
 [![release](https://img.shields.io/github/v/release/ankitkpandey1/ccplan?sort=semver)](https://github.com/ankitkpandey1/ccplan/releases/latest)
 [![license](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)](#license)
 
@@ -69,6 +70,9 @@ curl --proto '=https' --tlsv1.2 -LsSf https://github.com/ankitkpandey1/ccplan/re
 
 # Windows (PowerShell)
 powershell -c "irm https://github.com/ankitkpandey1/ccplan/releases/latest/download/ccplan-installer.ps1 | iex"
+
+# From crates.io (any platform with a Rust toolchain)
+cargo install ccplan
 ```
 
 Every release ships signed-checksum archives for Linux (x64/ARM64) and macOS (Intel/Apple Silicon),
